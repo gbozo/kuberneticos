@@ -45,6 +45,6 @@
     "gulp-livereload": "^4.0.1",
     "gulp-util": "^3.0.8",
     "gulp-yarn": "^2.0.0",
-    "node-notifier": "^5.4.0"
+    "node-notifier": "^8.0.1"
   }
 }

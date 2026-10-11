@@ -1,10 +1,10 @@
 # spec.md — KuberneticOS project specification
 
-Status: **active** · Version target: **2026 modern stack** · License: GPL-3
+Status: **implemented** · Stack: **TypeScript + React 19 + Vite + Go** · License: GPL-3
 
-This document specifies what KuberneticOS *is* and what it must become.
-`agents.md` points agents here. Decision points (D1–D5) are flagged inline and
-tracked in the decision table at the end.
+This document specifies what KuberneticOS *is*. The modernization it once
+described is complete: §2 records what was replaced, §3 onward describes the
+code that is actually in the repository. `agents.md` points agents here.
 
 ---
 
@@ -13,118 +13,150 @@ tracked in the decision table at the end.
 KuberneticOS is a **web desktop for Kubernetes**. It renders a real desktop
 metaphor in the browser — taskbar, start menu, context menu, resizable
 overlapping windows, focus/blur — and the "applications" that run inside those
-windows manage Kubernetes clusters: nodes, pods, Helm-style package
-management, and a task-manager style multi-level drill-down.
+windows manage Kubernetes clusters.
 
 The Windows-like look is deliberate: users already understand a desktop, and
-that familiarity is the product's affordance. The roadmap includes MacOS,
-Gnome, and KDE skins as **themes**, not code forks.
+that familiarity is the product's affordance. MacOS, Gnome, and KDE skins ship
+as **themes** (token overrides), not code forks.
 
-## 2. Current state (as found)
+## 2. Modernization outcome
 
-| Aspect | Now | Target |
+| Aspect | Before | Now |
 |---|---|---|
-| Language | Flow-syntax JS (`import X from "y"`, `import * as`, `const a: T`) — not parseable by modern toolchains | TypeScript, ES modules, strict mode |
-| React | 16.7, `extends Component` classes, `static contextTypes` | React 19.x, function components + `use*` hooks |
-| App shell | Create React App 2.1.3 (deprecated) | Vite 6 + React plugin |
-| Theming | `react-uwp` (abandoned ~2018) | Local components + one themed CSS stylesheet with design tokens |
-| Window resize | `react-rnd` 9.1 | Keep `react-rnd` (still maintained) or small custom implementation — decision D5 |
-| State/event layer | `flux` Dispatcher + EventEmitter "store" + `WMActions` | Plain immutable state + a small typed event bus only where cross-component observation is required |
+| Language | Flow-syntax JS (`import X from "y"`, `const a: T`) | TypeScript strict, ES modules |
+| React | 16.7, `extends Component`, `static contextTypes` | React 19, function components + hooks |
+| App shell | Create React App 2.1.3 | Vite 6 (`@vitejs/plugin-react`) |
+| Theming | `react-uwp` (abandoned ~2018) | Local components + design tokens (`--kos-*`) |
+| Window resize | `react-rnd` 9.1 | `react-rnd` 10.x (kept — decision D5) |
+| State/event layer | `flux` Dispatcher + EventEmitter store + `WMActions` | Immutable reducer + typed event bus (React context) |
 | IDs | `shortid` | `crypto.randomUUID()` |
-| Build | gulp 4 + babel-register + flow-bin + styleguidist | vite build; no gulp; no babel-register |
-| Tests | CRA `App.test.js` (jest via react-scripts) | vitest units + playwright e2e |
+| Build | gulp 4 + babel-register + flow-bin + styleguidist | `vite build` (`tsc -b && vite build`) |
+| Tests | CRA `App.test.js` | vitest units + Playwright e2e |
 | Lint/format | implicit CRA eslint | eslint 9 flat config + prettier |
-| Go code | ~2,200 vendored files of the deprecated `kubernetes-client/go` | Decision D1 (delete vs. keep as vendor data) |
-| Docs | README (CRA template, wrong badges), stale `help.md` | Rewritten README; `help.md` replaced |
+| Go code | ~2,200 vendored files of the deprecated `kubernetes-client/go` | Deleted; `server/` uses `k8s.io/client-go` |
+| Docs | CRA-template README with wrong badges, stale `help.md` | Rewritten README; `help.md` removed |
 
-The app today has **no live Kubernetes connection** — the cluster management
-described in the README is aspirational.
-
-## 3. Architecture (target)
+## 3. Architecture
 
 ```
 ┌──────────────────────────────────────────────────────────┐
 │ Desktop shell (React 19 + Vite, TypeScript)              │
 │  Taskbar ── Clock · StartMenu · WindowList · ContextMenu │
 │  WindowManager ── z-order, focus/blur, minimize/restore  │
-│  Window apps ── pluggable "apps" (TestWindow today,     │
-│                  cluster/pod/Helm apps in future)        │
+│  Window apps ── pluggable registry (TestWindow,          │
+│                  ClusterExplorer)                        │
 └───────────────┬──────────────────────────────────────────┘
-                │ typed client interface (no raw fetch in components)
+                │ typed ClusterClient interface
+                │ (no raw fetch outside src/cluster/client.ts)
+                │ Vite dev proxy: /api → http://localhost:8700
 ┌───────────────▼──────────────────────────────────────────┐
-│ Cluster layer: browser client to a proxied cluster API   │
-│ (decision D2: which client/transport — see §6)           │
+│ Go server (server/, stdlib net/http + k8s.io/client-go)  │
+│  /api/clusters · /api/nodes · /api/pods · /api/health     │
+│  live client (kubeconfig / in-cluster) ⇄ offline client   │
 └──────────────────────────────────────────────────────────┘
 ```
 
-### Behavior contract (must be preserved)
+### Behaviour contract (enforced by `e2e/desktop.spec.ts`)
 
-1. Taskbar is `position: fixed` at the bottom, `z-index` above windows.
-2. Windows overlap with z-ordering; the focused window is frontmost and
-   visually distinct (focus/blur states).
-3. Windows are draggable and resizable; minimize/restore and close semantics
-   exist and are distinct.
-4. Start menu opens from the taskbar above it (z 1050 vs taskbar 1100 layering
-   as currently coded — keep the layering, not the magic numbers).
-5. Right-click anywhere opens the context menu.
-6. The clock ticks in the taskbar.
+1. The taskbar is pinned to the bottom of the viewport (`--kos-taskbar-z`,
+   `1100`) — above the window layer.
+2. Windows overlap with a z-order; the focused window is raised frontmost and
+   visually distinct from blurred windows (`.is-focused` / `.is-blurred`).
+3. Windows are draggable and resizable; **minimize/restore and close are
+   distinct** operations.
+4. The start menu opens from the taskbar **above** it geometrically and below
+   the taskbar in z-order (`--kos-startmenu-z`, `1050`).
+5. Right-click anywhere opens the context menu; it flips at viewport edges and
+   closes on outside click, scroll, or Escape.
+6. The clock ticks once a second and shows the full date-time on hover.
 
-### State model (target)
+Maximized windows derive their geometry from the viewport minus the taskbar
+height and restore their stored geometry when un-maximized.
 
-- One immutable `DesktopState` (windows list, focus, z-order, app registry).
-- A single event bus (`dispatch(action)` → typed action records) **only** for
-  cross-component observation (focus changes, store listeners). No
-  EventEmitter-per-store pattern, no `flux` package.
-- Components subscribe via React hooks (`useEvent`-style), not
-  `addChangeListener` bookkeeping.
+### State model (as implemented)
 
-## 4. Modernization plan
+- **One** immutable `DesktopState` in `src/state/types.ts`: `windows`,
+  `focusedWindowId`, `startMenuOpen`, `contextMenu`, `nextZIndex`.
+- `src/state/reducer.ts` holds the pure `desktopReducer` plus selectors
+  `getVisibleWindows`, `getTaskbarWindows`, `getFocusedWindow`. Action union:
+  `ADD_WINDOW`, `REMOVE_WINDOW`, `FOCUS_WINDOW`, `MINIMIZE_WINDOW`,
+  `RESTORE_WINDOW`, `TOGGLE_MAXIMIZE`, `MOVE_WINDOW`, `RESIZE_WINDOW`,
+  `TOGGLE_START_MENU`, `OPEN_CONTEXT_MENU`, `CLOSE_CONTEXT_MENU`.
+- `src/state/events.ts` is a small typed bus (`window-added`, `window-removed`,
+  `window-focused`, `window-minimized`, `window-restored`,
+  `start-menu-toggled`) used **only** for cross-component observation.
+- `src/state/DesktopContext.tsx` wires `useReducer` + the bus and exposes
+  `useDesktop()` and `useDesktopEvent(type, handler)`.
+- Theming lives in `src/theme/`: `tokens.css` defines every `--kos-*` token for
+  the default `windows` theme plus `macos`/`gnome`/`kde` override blocks;
+  `theme.ts` applies the theme to `<html>` and persists it.
 
-- **D2 — App framework**: Vite + React 19 + TypeScript. (CRA is deprecated;
-  react-scripts upgrades won't reach 2026 idioms.)
-- **D3 — Build tooling**: delete `gulpfile.babel.js`, `.babelrc`,
-  `.flowconfig`, `babel-register`, `source-map-explorer`; vite handles build/dev.
-- **D4 — Theming**: replace every `react-uwp` widget with small local
-  components (`AppBarButton`, `Menu`, `Toggle`, `Icon`, `Tooltip`, …) styled by
-  one CSS file with custom properties; ship a `windows-11`-style default theme
-  and stub theme slots for macos/gnome/kde.
-- **D5 — Window resize**: keep `react-rnd` (maintained upstream) or write a
-  ~100-line custom drag/resize controller. Either is acceptable; keep the
-  behavior contract.
-- **Language conversion**: convert Flow sources to TypeScript ES modules as a
-  rewrite, not incremental syntax fixes (see agents.md rule 2).
-- **Docs**: rewrite README (fix badges, real getting-started), delete
-  `help.md` CRA boilerplate, keep `FUNDING.yml` and LICENSE.
+## 4. Frontend surface
 
-## 5. Testing (target)
+- **UI primitives** (`src/components/ui/`): `AppBarButton`, `AppBarSeparator`,
+  `AutoSuggestBox`, `CheckBox`, `Icon`, `ListView`, `Menu`/`MenuItem`,
+  `Separator`, `Toggle`, `Tooltip` — all local, all token-driven, no UI kit.
+- **Shell** (`src/components/`): `Window`, `WindowApp`, `WindowManager`,
+  `TaskBar`, `TaskBarWindows`, `TaskBarClock`, `StartMenu`, `Contextmenu`.
+- **Window apps** (`src/window-apps/`): `TestWindow`, `ClusterExplorer`,
+  registered in `registry.ts`. Cluster Explorer lists clusters and shows
+  *"No clusters configured — start the Go server"* when the API returns none.
 
-- `vitest`: unit tests for state model (window add/remove/focus, z-order,
-  actions) — pure functions, no DOM.
-- `playwright` e2e: boot the desktop, open a window, assert taskbar/focus
-  behavior. Replaces the CRA `App.test.js`.
+## 5. Kubernetes integration (as implemented)
 
-## 6. Kubernetes integration (target)
+The cluster connection is **server-side**, per decision D2. The frontend holds
+exactly one integration point, `src/cluster/client.ts`:
 
-The README promises cluster management; the code has none. Two candidate
-shapes — **this is decision D2's second half**:
+```ts
+interface ClusterClient {
+  listClusters(): Promise<readonly ClusterInfo[]>;
+  listNodes(clusterId: string): Promise<readonly NodeInfo[]>;
+  listPods(clusterId: string, node?: string, namespace?: string): Promise<readonly PodInfo[]>;
+}
+```
 
-- **A. Browser-side**: TypeScript client (e.g. `backstage/kubernetes-client`-style
-  or a thin typed wrapper over the cluster REST API) talking to a CORS-proxied
-  API. Keeps the app a pure web app.
-- **B. Server-side Go**: a real Go service using the modern
-  [`go/kubernetes-client`](https://github.com/kubernetes-client/go) (generated
-  from the OpenAPI spec — *not* the vendored legacy tree), serving JSON to the
-  web app. This is what the vendored Go tree hints the original author wanted.
+- `ClusterInfo { id, name, server }`, `NodeInfo { name, status, roles, version? }`,
+  `PodInfo { name, namespace, node?, phase }`.
+- `HttpClusterClient` (the default) talks to `/api` and unwraps the server's
+  `{ source, clusters|nodes|pods }` envelopes.
+- `OfflineClusterClient` returns empty lists — the fallback that keeps the app
+  usable with no server.
 
-Either way: one typed client interface in the app; no scattered `fetch`.
+The Go server (`server/main.go`) uses the standard library `net/http` and
+`k8s.io/client-go` v0.37.1:
+
+| Endpoint | Response |
+|---|---|
+| `GET /api/health` | `{"status":"ok","source":"live"\|"offline"}` |
+| `GET /api/clusters` | `{"source":…,"clusters":[{"id","name","server"}]}` |
+| `GET /api/nodes?cluster=<id>` | `{"source":…,"nodes":[{"name","status","roles","version"}]}` |
+| `GET /api/pods?cluster=<id>&node=<name>&namespace=<ns>` | `{"source":…,"pods":[{"name","namespace","node","phase"}]}` |
+
+Kubeconfig resolution order is `KUBERNETICOS_KUBECONFIG` → `KUBECONFIG` →
+in-cluster → `$HOME/.kube/config`. If none is usable the server must still
+start and answer `"source":"offline"` with empty lists — it must never crash.
+CORS is open (`*`) and `OPTIONS` returns 204.
+
+## 6. Testing
+
+- `vitest` (`npm run test`): 13 reducer tests (window add/remove/focus,
+  z-order, minimize/restore, maximize, immutability) + 7 cluster-client tests
+  (URL/query construction, envelope unwrapping, error handling, offline
+  fallback).
+- `playwright` (`npm run e2e`): 3 specs asserting the taskbar is pinned to the
+  bottom, the start menu opens above the taskbar and launches a window, and a
+  window closes via its title-bar control.
+- Gates: `tsc -b`, `eslint .`, `prettier --check .`, `vite build`,
+  `go build ./...`, `go vet ./...`, `govulncheck ./...` and `npm audit` must
+  all stay clean.
 
 ## 7. Decision table
 
 | ID | Decision | Outcome |
 |---|---|---|
-| D1 | Vendored legacy Go tree | **Replace** with a dependency on the modern [`go/kubernetes-client`](https://github.com/kubernetes-client/go); delete the vendored subtree in one change |
-| D2 | Cluster integration shape | **B: Go server + modern client** — a Go service using `go/kubernetes-client` serves JSON to the web app through one typed client interface |
-| D3 | Build tooling | **Remove** gulp, flow, babel-register, styleguidist, source-map-explorer; Vite owns build/dev |
-| D4 | react-uwp replacement | **Replace** all react-uwp widgets with small local components + one themed CSS stylesheet with design tokens (theme slots: windows default, macos/gnome/kde stubs) |
-| D5 | Window resize | **Keep `react-rnd`** (maintained upstream, works with React 19) |
-| D6 | Scope | **Full code modernization**: rewrite the app to TypeScript + React 19 + Vite, add the Go server, rewrite docs |
+| D1 | Vendored legacy Go tree | **Deleted.** The archived `github.com/kubernetes-client/go` is superseded by the maintained **`k8s.io/client-go`**, which the server depends on. |
+| D2 | Cluster integration shape | **Go server + typed client (B).** `server/` serves JSON under `/api` via Vite's dev proxy; the app calls it through `HttpClusterClient`. |
+| D3 | Build tooling | **Vite owns build/dev.** gulp, flow, babel-register, styleguidist and source-map-explorer are gone. |
+| D4 | react-uwp replacement | **Local components + tokens.** Ten primitives in `src/components/ui/`; themes are `--kos-*` token overrides (windows default, macos/gnome/kde stubs). |
+| D5 | Window resize | **Kept `react-rnd`** (10.x), driving drag/resize with the behaviour contract intact. |
+| D6 | Scope | **Full code modernization**, delivered: TS + React 19 + Vite frontend, Go server, rewritten docs, and clean `npm audit` / `govulncheck` baselines. |

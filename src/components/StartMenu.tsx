@@ -71,7 +71,7 @@ export function StartMenu({ onCycleTheme }: StartMenuProps) {
         </ListView>
       </div>
       <footer className="kos-startmenu__footer">
-        <span className="kos-startmenu__note">Cluster: offline</span>
+        <span className="kos-startmenu__note">Cluster API: /api</span>
         {onCycleTheme ? (
           <button type="button" className="kos-startmenu__theme" onClick={onCycleTheme}>
             <Icon name="settings" size={14} />

@@ -36,7 +36,7 @@ interface PodsResponse {
 export interface ClusterClient {
   listClusters(): Promise<readonly ClusterInfo[]>;
   listNodes(clusterId: string): Promise<readonly NodeInfo[]>;
-  listPods(clusterId: string, node?: string): Promise<readonly PodInfo[]>;
+  listPods(clusterId: string, node?: string, namespace?: string): Promise<readonly PodInfo[]>;
 }
 
 export class OfflineClusterClient implements ClusterClient {
@@ -48,7 +48,11 @@ export class OfflineClusterClient implements ClusterClient {
     return [];
   }
 
-  async listPods(_clusterId: string, _node?: string): Promise<readonly PodInfo[]> {
+  async listPods(
+    _clusterId: string,
+    _node?: string,
+    _namespace?: string,
+  ): Promise<readonly PodInfo[]> {
     return [];
   }
 }
@@ -81,18 +85,22 @@ export class HttpClusterClient implements ClusterClient {
     return envelope.nodes;
   }
 
-  async listPods(clusterId: string, node?: string): Promise<readonly PodInfo[]> {
+  async listPods(
+    clusterId: string,
+    node?: string,
+    namespace?: string,
+  ): Promise<readonly PodInfo[]> {
     const params = new URLSearchParams({ cluster: clusterId });
     if (node !== undefined) params.set('node', node);
+    if (namespace !== undefined) params.set('namespace', namespace);
     const envelope = await requestJson<PodsResponse>(`${this.baseUrl}/pods?${params.toString()}`);
     return envelope.pods;
   }
 }
 
-// TODO: switch to HttpClusterClient once the Go server (decision D2) is wired up
-// and serving JSON at the proxied `/api` base path.
+// The frontend talks to the Go server through the Vite-proxied `/api` base path.
 export function createClusterClient(): ClusterClient {
-  return new OfflineClusterClient();
+  return new HttpClusterClient();
 }
 
 export const clusterClient: ClusterClient = createClusterClient();

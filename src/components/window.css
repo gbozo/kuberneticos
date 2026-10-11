@@ -1,0 +1,91 @@
+/* Window chrome — styled from the design tokens in src/theme/tokens.css */
+
+.kos-window {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: var(--kos-window-radius);
+  background: var(--kos-window-bg);
+  color: var(--kos-window-fg);
+  box-shadow: var(--kos-window-shadow);
+  font-family: var(--kos-font-family);
+}
+
+.kos-window__frame {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+}
+
+.kos-window__titlebar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 4px 0 10px;
+  background: var(--kos-window-titlebar-bg);
+  color: var(--kos-window-fg);
+  font-size: 13px;
+  user-select: none;
+}
+
+.kos-window__drag-handle {
+  cursor: move;
+}
+
+.kos-window__icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  color: inherit;
+}
+
+.kos-window__title {
+  flex: 1 1 auto;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.kos-window__controls {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+}
+
+.kos-window__control {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.kos-window__control:hover {
+  background: var(--kos-hover);
+}
+
+.kos-window__control:focus-visible {
+  outline: var(--kos-focus-outline);
+  outline-offset: -2px;
+}
+
+.kos-window__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 12px;
+  overflow: auto;
+}
+
+.kos-window.is-blurred .kos-window__titlebar {
+  background: var(--kos-window-titlebar-bg-inactive);
+  opacity: 0.85;
+}

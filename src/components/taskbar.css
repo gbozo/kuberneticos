@@ -1,0 +1,48 @@
+/* Taskbar — fixed bottom bar above windows, styled from design tokens. */
+
+.kos-taskbar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: var(--kos-taskbar-z);
+  display: flex;
+  align-items: center;
+  height: var(--kos-taskbar-height);
+  padding: 0 8px;
+  background: var(--kos-taskbar-bg);
+  color: var(--kos-taskbar-fg);
+  font-family: var(--kos-font-family);
+}
+
+.kos-taskbar__side {
+  display: flex;
+  align-items: center;
+  flex: 0 1 auto;
+  gap: 4px;
+  min-width: 0;
+}
+
+.kos-taskbar__side--right {
+  justify-content: flex-end;
+}
+
+.kos-taskbar__center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1 1 auto;
+  gap: 4px;
+  min-width: 0;
+  padding: 0 8px;
+  overflow: hidden;
+}
+
+.kos-taskbar-clock {
+  padding: 0 10px;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+  user-select: none;
+  cursor: default;
+}

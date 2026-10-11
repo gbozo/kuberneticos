@@ -1,0 +1,12 @@
+dist
+node_modules
+package-lock.json
+src/github.com
+.serena
+*.md
+.github
+.vscode
+_config.yml
+public
+playwright-report
+test-results

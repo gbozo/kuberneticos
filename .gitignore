@@ -74,3 +74,15 @@ _testmain.go
 .env.test.local
 .env.production.local
 
+# ---> KuberneticOS (modern tooling)
+# IDE / tooling state
+/.serena/
+
+# Vite / tsc build output
+/dist/
+*.tsbuildinfo
+
+# Playwright output
+/test-results/
+/playwright-report/
+

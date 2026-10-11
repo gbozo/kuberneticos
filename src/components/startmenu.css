@@ -1,0 +1,93 @@
+/* Start menu — panel anchored directly above the taskbar. */
+
+.kos-startmenu {
+  position: fixed;
+  left: 0;
+  bottom: var(--kos-taskbar-height);
+  z-index: var(--kos-startmenu-z);
+  display: flex;
+  flex-direction: column;
+  width: 320px;
+  max-height: calc(100vh - var(--kos-taskbar-height));
+  background: var(--kos-window-bg);
+  color: var(--kos-window-fg);
+  border: 1px solid var(--kos-border);
+  border-radius: var(--kos-window-radius);
+  box-shadow: var(--kos-window-shadow);
+  font-family: var(--kos-font-family);
+}
+
+.kos-startmenu__header {
+  flex: 0 0 auto;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--kos-border);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.kos-startmenu__apps {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.kos-startmenu__item {
+  margin: 0;
+}
+
+.kos-startmenu__launch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.kos-startmenu__launch:hover {
+  background: var(--kos-hover);
+}
+
+.kos-startmenu__launch:focus-visible {
+  outline: var(--kos-focus-outline);
+  outline-offset: -2px;
+}
+
+.kos-startmenu__footer {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--kos-border);
+}
+
+.kos-startmenu__note {
+  color: var(--kos-muted);
+  font-size: 12px;
+}
+
+.kos-startmenu__theme {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.kos-startmenu__theme:hover {
+  background: var(--kos-hover);
+}

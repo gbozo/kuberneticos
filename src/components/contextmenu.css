@@ -1,0 +1,7 @@
+/* Context menu — fixed overlay, clamped to the viewport. */
+
+.kos-contextmenu {
+  position: fixed;
+  z-index: var(--kos-startmenu-z);
+  font-family: var(--kos-font-family);
+}

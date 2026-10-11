@@ -1,111 +1,129 @@
 <p align="center">
   <a href="" rel="noopener">
- <img width=200px height=200px src="https://raw.githubusercontent.com/gbozo/kuberneticos/master/src/assets/kubernetesoslogo.png" alt="Project logo"></a>
+ <img width=200px height=200px src="src/assets/kubernetesoslogo.png" alt="Project logo"></a>
 </p>
 
-<h3 align="center">kuberneticos</h3>
+<h3 align="center">KuberneticOS</h3>
 
 <div align="center">
 
 [![Status](https://img.shields.io/badge/status-active-success.svg)]()
-[![GitHub Issues](https://img.shields.io/github/issues/kylelobo/The-Documentation-Compendium.svg)](https://github.com/gbozo/kuberneticos/issues)
-[![GitHub Pull Requests](https://img.shields.io/github/issues-pr/kylelobo/The-Documentation-Compendium.svg)](https://github.com/gbozo/kuberneticos/pulls)
+[![GitHub Issues](https://img.shields.io/github/issues/gbozo/kuberneticos.svg)](https://github.com/gbozo/kuberneticos/issues)
+[![GitHub Pull Requests](https://img.shields.io/github/issues-pr/gbozo/kuberneticos.svg)](https://github.com/gbozo/kuberneticos/pulls)
 [![License](https://img.shields.io/badge/license-GPLv3-yellowgreen)](/LICENSE)
 
 </div>
 
 ---
 
-<p align="center"> KuberneticOS is a Web Desktop for kubernetes. It has a real window manager written in react and mimics/acts like a real desktop. The resemblence with Microsoft Windows is done on purpose, the main goal of this project is to give users the feeling of something that they already know can be applied to kubernetes. This projects aim to release also MacOS, Gnome, KDE look and feel. 
-    <br> 
+<p align="center"> KuberneticOS is a Web Desktop for Kubernetes. It has a real window
+manager written in React and mimics/acts like a real desktop — the resemblance to
+Microsoft Windows is deliberate. The goal is to give users a familiar environment
+in which to explore and manage a Kubernetes cluster. Windows, macOS, GNOME and KDE
+themes are on the roadmap.
+    <br>
 </p>
 
-## 📝 Table of Contents
+## About
 
-- [About](#about)
-- [Getting Started](#getting_started)
-- [Deployment](#deployment)
-- [Usage](#usage)
-- [Built Using](#built_using)
-- [TODO](../TODO.md)
-- [Contributing](../CONTRIBUTING.md)
-- [Authors](#authors)
-- [Acknowledgments](#acknowledgement)
+KuberneticOS is a browser desktop environment for Kubernetes. A taskbar, start
+menu, focus-aware resizable windows and a right-click context menu form the shell;
+"applications" running inside windows talk to a cluster through a single typed
+client layer.
 
-## 🧐 About <a name = "about"></a>
+Planned / in progress:
 
-A desktop for kubernetes that will incorporate:
-A package manager(HELM Charts) for Kubernetes in order to install stuff to your kubernetes cluster that will seamless integrate with KuberneticOS.
-Node,RS,RC,Pod etc management. Taskbar right click , kubernetes task manager with multi level drill down.
+- A package manager (Helm charts) that installs software into your cluster and
+  integrates it with KuberneticOS.
+- Node / ReplicaSet / ReplicationController / Pod management.
+- A Kubernetes task manager with multi-level drill-down, launched from the
+  taskbar.
 
-## 🏁 Getting Started <a name = "getting_started"></a>
+This project is specified in [`spec.md`](spec.md) and documented for contributors
+and AI agents in [`agents.md`](agents.md).
 
-These instructions will get you a copy of the project up and running on your local machine for development and testing purposes. See [deployment](#deployment) for notes on how to deploy the project on a live system.
-Simply use yarn , yarn start.
+## Repository layout
+
+| Path | What it is |
+|---|---|
+| `src/` | The frontend: TypeScript + React 19 + Vite. Shell components, state model, window apps. |
+| `src/state/` | Immutable `DesktopState` reducer + typed event bus. |
+| `src/components/ui/` | Small local UI kit (buttons, menus, toggles, icons) that replaced the abandoned `react-uwp`. |
+| `src/window-apps/` | Pluggable window applications (e.g. TestWindow, ClusterExplorer). |
+| `src/theme/` | Design tokens + the Windows/macOS/GNOME/KDE theme slots. |
+| `src/cluster/` | The one typed cluster-client interface. |
+| `server/` | Go JSON API backed by [`k8s.io/client-go`](https://github.com/kubernetes/client-go). |
+
+## 🏁 Getting Started
 
 ### Prerequisites
 
-A kubernetes cluster or minikube for development. The project outcome is actually a container so you really need a docker instance somewhere or kubernetes.
+- Node.js 20+ and npm (the app is built with Vite).
+- Go 1.24+ (only if you run the cluster server).
+- A Kubernetes cluster — or minikube — reachable through a kubeconfig (optional:
+  without one the server runs in offline mode).
 
-### Installing
+### Install & run the frontend
 
-A step by step series of examples that tell you how to get a development env running.
-
-Say what the step will be
-
-```
-Give the example
-```
-
-And repeat
-
-```
-until finished
+```bash
+npm install
+npm run dev          # Vite dev server, http://localhost:5173
 ```
 
-End with an example of getting some data out of the system or using it for a little demo.
+The dev server proxies `/api` to the Go server at `http://localhost:8700`
+(see `vite.config.ts`).
 
-## 🔧 Running the tests <a name = "tests"></a>
+### Run the cluster server (optional)
 
-Explain how to run the automated tests for this system.
-
-### Break down into end to end tests
-
-Explain what these tests test and why
-
-```
-Give an example
+```bash
+cd server
+go run .             # listens on :8700, CORS-enabled JSON API
 ```
 
-### And coding style tests
+Without cluster configuration the server still starts and answers with
+`"source":"offline"` and empty lists, so the web desktop runs either way. See
+[`server/README.md`](server/README.md) for endpoints and environment variables.
 
-Explain what these tests test and why
+### Production build
 
+```bash
+npm run build        # typecheck + vite build → dist/
+npm run preview      # serve the production build locally
 ```
-Give an example
-```
 
-## 🎈 Usage <a name="usage"></a>
+## 🔧 Scripts
 
-Add notes about how to use the system.
+| Command | Purpose |
+|---|---|
+| `npm run dev` | Vite dev server with HMR |
+| `npm run build` | `tsc -b && vite build` |
+| `npm run preview` | Serve the production build |
+| `npm run lint` | ESLint 9 (flat config) |
+| `npm run format` / `npm run format:check` | Prettier |
+| `npm run test` | Vitest unit tests |
+| `npm run e2e` | Playwright end-to-end tests |
 
-## 🚀 Deployment <a name = "deployment"></a>
+## 🎈 Architecture
 
-Add additional notes about how to deploy this on a live system.
+- **One immutable desktop state.** `src/state/reducer.ts` is a pure reducer over
+  `DesktopState` (windows, focus, z-order, start menu, context menu); focus and
+  z-order are computed, not stored as CSS hacks.
+- **A typed event bus** (`src/state/events.ts`) is the only cross-component
+  observation channel (window added/removed/focused, start-menu toggled).
+- **Windows** are `react-rnd` elements whose geometry lives in state; the focused
+  window is frontmost below the taskbar, blur/minimize/restore are distinct.
+- **Cluster access** is centralized in the typed `ClusterClient`
+  (`src/cluster/client.ts`): an offline default and an HTTP implementation that
+  talks to the Go server. No ad-hoc `fetch` calls in components.
 
-## ⛏️ Built Using <a name = "built_using"></a>
+## ✍️ Authors
 
-- [Express](https://expressjs.com/) - Server Framework
-- [NodeJs](https://nodejs.org/en/) - Server Environment
+- [@gbozo](https://github.com/gbozo) — idea & initial work.
 
-## ✍️ Authors <a name = "authors"></a>
+See also the list of
+[contributors](https://github.com/gbozo/kuberneticos/graphs/contributors) who
+participated in this project.
 
-- [@gbozo](https://github.com/gbozo) - Idea & Initial work
+## License
 
-See also the list of [contributors](https://github.com/gbozo/kuberneticos/graphs/contributors) who participated in this project.
-
-## 🎉 Acknowledgements <a name = "acknowledgement"></a>
-
-- Hat tip to anyone whose code was used
-- Inspiration
-- References
+GPL-3.0. See [`LICENSE`](LICENSE).

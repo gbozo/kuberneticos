@@ -1,0 +1,137 @@
+:root {
+  color-scheme: dark;
+
+  --kos-accent: #0078d7;
+  --kos-accent-fg: #ffffff;
+
+  --kos-desktop-bg: #101418;
+
+  --kos-taskbar-bg: #000000;
+  --kos-taskbar-fg: rgba(255, 255, 255, 0.8);
+  --kos-taskbar-height: 48px;
+  --kos-taskbar-z: 1100;
+  --kos-startmenu-z: 1050;
+
+  --kos-window-bg: #1b1b1b;
+  --kos-window-titlebar-bg: #1f1f1f;
+  --kos-window-titlebar-bg-inactive: rgba(26, 26, 26, 0.6);
+  --kos-window-fg: #ffffff;
+  --kos-window-shadow: 2px 2px 8px 3px rgba(0, 0, 0, 0.2);
+  --kos-window-radius: 4px;
+
+  --kos-font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+
+  --kos-context-menu-bg: #2b2b2b;
+  --kos-context-menu-fg: #ffffff;
+  --kos-context-menu-hover: rgba(255, 255, 255, 0.12);
+
+  --kos-border: rgba(255, 255, 255, 0.12);
+  --kos-hover: rgba(255, 255, 255, 0.1);
+  --kos-muted: rgba(255, 255, 255, 0.6);
+  --kos-input-bg: rgba(255, 255, 255, 0.06);
+  --kos-input-border: rgba(255, 255, 255, 0.2);
+  --kos-toggle-bg: rgba(255, 255, 255, 0.25);
+  --kos-toggle-thumb-bg: #ffffff;
+  --kos-tooltip-bg: #2b2b2b;
+  --kos-tooltip-fg: #ffffff;
+  --kos-focus-outline: 2px solid var(--kos-accent);
+}
+
+.theme-macos {
+  color-scheme: light;
+
+  --kos-accent: #0a84ff;
+  --kos-accent-fg: #ffffff;
+
+  --kos-desktop-bg: #1c1c1e;
+
+  --kos-taskbar-bg: rgba(30, 30, 30, 0.62);
+  --kos-taskbar-fg: #f5f5f7;
+
+  --kos-window-bg: #f5f5f7;
+  --kos-window-titlebar-bg: #e6e6e6;
+  --kos-window-titlebar-bg-inactive: rgba(240, 240, 240, 0.7);
+  --kos-window-fg: #1d1d1f;
+  --kos-window-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  --kos-window-radius: 10px;
+
+  --kos-context-menu-bg: rgba(245, 245, 247, 0.96);
+  --kos-context-menu-fg: #1d1d1f;
+  --kos-context-menu-hover: rgba(0, 0, 0, 0.08);
+
+  --kos-border: rgba(0, 0, 0, 0.15);
+  --kos-hover: rgba(0, 0, 0, 0.08);
+  --kos-muted: rgba(0, 0, 0, 0.55);
+  --kos-input-bg: rgba(0, 0, 0, 0.05);
+  --kos-input-border: rgba(0, 0, 0, 0.2);
+  --kos-toggle-bg: rgba(0, 0, 0, 0.2);
+  --kos-toggle-thumb-bg: #ffffff;
+  --kos-tooltip-bg: rgba(30, 30, 30, 0.92);
+  --kos-tooltip-fg: #ffffff;
+}
+
+.theme-gnome {
+  color-scheme: dark;
+
+  --kos-accent: #3584e4;
+  --kos-accent-fg: #ffffff;
+
+  --kos-desktop-bg: #2d2d2d;
+
+  --kos-taskbar-bg: rgba(0, 0, 0, 0.72);
+  --kos-taskbar-fg: #ffffff;
+
+  --kos-window-bg: #303030;
+  --kos-window-titlebar-bg: #3d3d3d;
+  --kos-window-titlebar-bg-inactive: rgba(48, 48, 48, 0.65);
+  --kos-window-fg: #ffffff;
+  --kos-window-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  --kos-window-radius: 8px;
+
+  --kos-context-menu-bg: #383838;
+  --kos-context-menu-fg: #ffffff;
+  --kos-context-menu-hover: rgba(255, 255, 255, 0.1);
+
+  --kos-border: rgba(255, 255, 255, 0.12);
+  --kos-hover: rgba(255, 255, 255, 0.1);
+  --kos-muted: rgba(255, 255, 255, 0.6);
+  --kos-input-bg: rgba(255, 255, 255, 0.07);
+  --kos-input-border: rgba(255, 255, 255, 0.2);
+  --kos-toggle-bg: rgba(255, 255, 255, 0.2);
+  --kos-toggle-thumb-bg: #ffffff;
+  --kos-tooltip-bg: #383838;
+  --kos-tooltip-fg: #ffffff;
+}
+
+.theme-kde {
+  color-scheme: dark;
+
+  --kos-accent: #3daee9;
+  --kos-accent-fg: #ffffff;
+
+  --kos-desktop-bg: #1b1e20;
+
+  --kos-taskbar-bg: rgba(27, 30, 32, 0.92);
+  --kos-taskbar-fg: #eff0f1;
+
+  --kos-window-bg: #232629;
+  --kos-window-titlebar-bg: #31363b;
+  --kos-window-titlebar-bg-inactive: rgba(35, 38, 41, 0.65);
+  --kos-window-fg: #eff0f1;
+  --kos-window-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+  --kos-window-radius: 3px;
+
+  --kos-context-menu-bg: #31363b;
+  --kos-context-menu-fg: #eff0f1;
+  --kos-context-menu-hover: rgba(61, 174, 233, 0.25);
+
+  --kos-border: rgba(255, 255, 255, 0.12);
+  --kos-hover: rgba(255, 255, 255, 0.1);
+  --kos-muted: rgba(255, 255, 255, 0.6);
+  --kos-input-bg: rgba(255, 255, 255, 0.06);
+  --kos-input-border: rgba(255, 255, 255, 0.2);
+  --kos-toggle-bg: rgba(255, 255, 255, 0.2);
+  --kos-toggle-thumb-bg: #eff0f1;
+  --kos-tooltip-bg: #31363b;
+  --kos-tooltip-fg: #eff0f1;
+}

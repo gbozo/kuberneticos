@@ -1,0 +1,291 @@
+/* KuberneticOS UI kit — styled entirely from the design tokens in src/theme/tokens.css */
+
+.kos-icon--clickable {
+  cursor: pointer;
+}
+
+/* --- AppBarButton (taskbar buttons) --- */
+
+.kos-appbar-button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  height: 40px;
+  min-width: 40px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--kos-taskbar-fg);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background 0.1s ease,
+    color 0.1s ease;
+}
+
+.kos-appbar-button:hover {
+  background: var(--kos-hover);
+}
+
+.kos-appbar-button:focus-visible {
+  outline: var(--kos-focus-outline);
+  outline-offset: -2px;
+}
+
+.kos-appbar-button.is-active {
+  background: var(--kos-accent);
+  color: var(--kos-accent-fg);
+}
+
+.kos-appbar-button__label {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* --- AppBarSeparator --- */
+
+.kos-appbar-separator {
+  align-self: center;
+  width: 1px;
+  height: 24px;
+  margin: 0 4px;
+  background: var(--kos-border);
+}
+
+/* --- Tooltip --- */
+
+.kos-tooltip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.kos-tooltip__bubble {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  z-index: var(--kos-taskbar-z);
+  transform: translateX(-50%);
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--kos-tooltip-bg);
+  color: var(--kos-tooltip-fg);
+  font-size: 12px;
+  white-space: nowrap;
+  box-shadow: var(--kos-window-shadow);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.kos-tooltip:hover .kos-tooltip__bubble,
+.kos-tooltip:focus-within .kos-tooltip__bubble {
+  opacity: 1;
+}
+
+/* --- Toggle (switch) --- */
+
+.kos-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--kos-window-fg);
+  font: inherit;
+  cursor: pointer;
+}
+
+.kos-toggle:focus-visible {
+  outline: var(--kos-focus-outline);
+  outline-offset: 2px;
+}
+
+.kos-toggle__track {
+  position: relative;
+  flex: 0 0 auto;
+  width: 40px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--kos-toggle-bg);
+  transition: background 0.15s ease;
+}
+
+.kos-toggle__thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--kos-toggle-thumb-bg);
+  transition: transform 0.15s ease;
+}
+
+.kos-toggle.is-checked .kos-toggle__track {
+  background: var(--kos-accent);
+}
+
+.kos-toggle.is-checked .kos-toggle__thumb {
+  transform: translateX(20px);
+}
+
+/* --- CheckBox --- */
+
+.kos-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--kos-window-fg);
+  font: inherit;
+  cursor: pointer;
+}
+
+.kos-checkbox input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--kos-accent);
+  cursor: pointer;
+}
+
+.kos-checkbox:focus-within {
+  outline: var(--kos-focus-outline);
+  outline-offset: 2px;
+}
+
+/* --- Separator --- */
+
+.kos-separator {
+  flex: 0 0 auto;
+  border: 0;
+  background: var(--kos-border);
+}
+
+.kos-separator--row {
+  width: 100%;
+  height: 1px;
+  margin: 4px 0;
+}
+
+.kos-separator--column {
+  width: 1px;
+  min-height: 16px;
+  height: 100%;
+  margin: 0 4px;
+}
+
+/* --- Menu --- */
+
+.kos-menu {
+  min-width: 180px;
+  padding: 4px;
+  border: 1px solid var(--kos-border);
+  border-radius: var(--kos-window-radius);
+  background: var(--kos-context-menu-bg);
+  color: var(--kos-context-menu-fg);
+  box-shadow: var(--kos-window-shadow);
+  font-size: 13px;
+  z-index: var(--kos-startmenu-z);
+}
+
+.kos-menu-item {
+  display: block;
+  padding: 6px 10px;
+  border-radius: 3px;
+  cursor: pointer;
+  user-select: none;
+  outline: none;
+}
+
+.kos-menu-item:hover,
+.kos-menu-item:focus-visible {
+  background: var(--kos-context-menu-hover);
+}
+
+.kos-menu-item.is-disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.kos-menu-item.is-disabled:hover,
+.kos-menu-item.is-disabled:focus-visible {
+  background: transparent;
+}
+
+.kos-menu-item__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.kos-menu-item__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  color: inherit;
+}
+
+.kos-menu-item__label {
+  flex: 1 1 auto;
+  white-space: nowrap;
+}
+
+.kos-menu-item__chevron {
+  opacity: 0.7;
+}
+
+.kos-menu-item__children {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 4px 0 2px 26px;
+}
+
+/* --- ListView (start menu) --- */
+
+.kos-listview {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 100%;
+  margin: 0;
+  padding: 4px;
+  overflow-y: auto;
+  list-style: none;
+}
+
+/* --- AutoSuggestBox --- */
+
+.kos-autosuggest {
+  display: block;
+}
+
+.kos-autosuggest__input {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--kos-input-border);
+  border-radius: 4px;
+  background: var(--kos-input-bg);
+  color: var(--kos-window-fg);
+  font: inherit;
+  font-size: 13px;
+}
+
+.kos-autosuggest__input::placeholder {
+  color: var(--kos-muted);
+}
+
+.kos-autosuggest__input:focus-visible {
+  outline: var(--kos-focus-outline);
+  outline-offset: -1px;
+}

@@ -43,16 +43,16 @@ as **themes** (token overrides), not code forks.
 │ Desktop shell (React 19 + Vite, TypeScript)              │
 │  Taskbar ── Clock · StartMenu · WindowList · ContextMenu │
 │  WindowManager ── z-order, focus/blur, minimize/restore  │
-│  Window apps ── pluggable registry (TestWindow,          │
-│                  ClusterExplorer)                        │
+│  Window apps ── registry: TestWindow, ClusterExplorer,   │
+│                  TaskManager                             │
 └───────────────┬──────────────────────────────────────────┘
-                │ typed ClusterClient interface
-                │ (no raw fetch outside src/cluster/client.ts)
-                │ Vite dev proxy: /api → http://localhost:8700
+                │ typed ClusterClient interface                 │
+                │ (no raw fetch outside src/cluster/client.ts) │
+                │ Vite dev proxy: /api → http://localhost:8700 │
 ┌───────────────▼──────────────────────────────────────────┐
 │ Go server (server/, stdlib net/http + k8s.io/client-go)  │
-│  /api/clusters · /api/nodes · /api/pods · /api/health     │
-│  live client (kubeconfig / in-cluster) ⇄ offline client   │
+│  /api/clusters · /api/namespaces · /api/nodes · /api/pods│
+│  live client (kubeconfig / in-cluster) ⇄ offline client  │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -98,9 +98,12 @@ height and restore their stored geometry when un-maximized.
   `Separator`, `Toggle`, `Tooltip` — all local, all token-driven, no UI kit.
 - **Shell** (`src/components/`): `Window`, `WindowApp`, `WindowManager`,
   `TaskBar`, `TaskBarWindows`, `TaskBarClock`, `StartMenu`, `Contextmenu`.
-- **Window apps** (`src/window-apps/`): `TestWindow`, `ClusterExplorer`,
-  registered in `registry.ts`. Cluster Explorer lists clusters and shows
-  *"No clusters configured — start the Go server"* when the API returns none.
+- **Window apps** (`src/window-apps/`): `TestWindow`, `ClusterExplorer` and
+  `TaskManager`, registered in `registry.ts`. Cluster Explorer lists clusters;
+  Task Manager drills down from a cluster to node detail and from a namespace to
+  its deployments / replica sets / replication controllers / services / pods and
+  pod logs. Both show *"No clusters configured — start the Go server"* when the
+  API returns none.
 
 ## 5. Kubernetes integration (as implemented)
 
@@ -110,17 +113,43 @@ exactly one integration point, `src/cluster/client.ts`:
 ```ts
 interface ClusterClient {
   listClusters(): Promise<readonly ClusterInfo[]>;
+  listNamespaces(clusterId: string): Promise<readonly NamespaceInfo[]>;
   listNodes(clusterId: string): Promise<readonly NodeInfo[]>;
-  listPods(clusterId: string, node?: string, namespace?: string): Promise<readonly PodInfo[]>;
+  getNode(clusterId: string, name: string): Promise<NodeDetailInfo>;
+  listDeployments(clusterId: string, namespace?: string): Promise<readonly DeploymentInfo[]>;
+  listReplicaSets(clusterId: string, namespace?: string): Promise<readonly ReplicaSetInfo[]>;
+  listReplicationControllers(
+    clusterId: string,
+    namespace?: string,
+  ): Promise<readonly ReplicationControllerInfo[]>;
+  listServices(clusterId: string, namespace?: string): Promise<readonly ServiceInfo[]>;
+  listPods(
+    clusterId: string,
+    node?: string,
+    namespace?: string,
+    selector?: string,
+  ): Promise<readonly PodInfo[]>;
+  getPodLogs(
+    clusterId: string,
+    namespace: string,
+    pod: string,
+    container?: string,
+    tailLines?: number,
+  ): Promise<string>;
 }
 ```
 
-- `ClusterInfo { id, name, server }`, `NodeInfo { name, status, roles, version? }`,
-  `PodInfo { name, namespace, node?, phase }`.
+- `ClusterInfo { id, name, server }`, `NamespaceInfo { name, status }`,
+  `NodeInfo { name, status, roles, version? }`, `NodeDetailInfo { name, status,
+  roles, version, capacity, allocatable, conditions, addresses }`,
+  `PodInfo { name, namespace, node?, phase }`, plus `DeploymentInfo`,
+  `ReplicaSetInfo`, `ReplicationControllerInfo` (each with a
+  `ReplicaCounts { desired, ready, available, updated }`) and
+  `ServiceInfo { name, namespace, type, clusterIP, ports }`.
 - `HttpClusterClient` (the default) talks to `/api` and unwraps the server's
-  `{ source, clusters|nodes|pods }` envelopes.
-- `OfflineClusterClient` returns empty lists — the fallback that keeps the app
-  usable with no server.
+  `{ source, … }` envelopes.
+- `OfflineClusterClient` returns empty lists, an empty-safe `NodeDetailInfo`
+  and empty log text — the fallback that keeps the app usable with no server.
 
 The Go server (`server/main.go`) uses the standard library `net/http` and
 `k8s.io/client-go` v0.37.1:
@@ -129,26 +158,39 @@ The Go server (`server/main.go`) uses the standard library `net/http` and
 |---|---|
 | `GET /api/health` | `{"status":"ok","source":"live"\|"offline"}` |
 | `GET /api/clusters` | `{"source":…,"clusters":[{"id","name","server"}]}` |
+| `GET /api/namespaces?cluster=<id>` | `{"source":…,"namespaces":[{"name","status"}]}` |
 | `GET /api/nodes?cluster=<id>` | `{"source":…,"nodes":[{"name","status","roles","version"}]}` |
-| `GET /api/pods?cluster=<id>&node=<name>&namespace=<ns>` | `{"source":…,"pods":[{"name","namespace","node","phase"}]}` |
+| `GET /api/nodes/detail?cluster=<id>&name=<node>` | `{"source":…,"node":{…NodeDetail}}` |
+| `GET /api/deployments?cluster=<id>&namespace=<ns>` | `{"source":…,"deployments":[{"name","namespace","replicas","images"}]}` |
+| `GET /api/replicasets?cluster=<id>&namespace=<ns>` | `{"source":…,"replicasets":[{"name","namespace","replicas"}]}` |
+| `GET /api/replicationcontrollers?cluster=<id>&namespace=<ns>` | `{"source":…,"replicationcontrollers":[{"name","namespace","replicas"}]}` |
+| `GET /api/services?cluster=<id>&namespace=<ns>` | `{"source":…,"services":[{"name","namespace","type","clusterIP","ports"}]}` |
+| `GET /api/pods?cluster=<id>&node=<name>&namespace=<ns>&selector=<sel>` | `{"source":…,"pods":[{"name","namespace","node","phase"}]}` |
+| `GET /api/pods/logs?cluster=<id>&namespace=<ns>&pod=<name>&container=<c>&tailLines=<n>` | `{"source":…,"logs":"…"}` |
 
 Kubeconfig resolution order is `KUBERNETICOS_KUBECONFIG` → `KUBECONFIG` →
 in-cluster → `$HOME/.kube/config`. If none is usable the server must still
 start and answer `"source":"offline"` with empty lists — it must never crash.
-CORS is open (`*`) and `OPTIONS` returns 204.
+CORS is open (`*`) and `OPTIONS` returns 204. `/api/nodes/detail` requires
+`name` (400 without it); a missing node or pod returns 404. Pod logs default to
+`tailLines=200`, clamped to 1–5000.
 
 ## 6. Testing
 
 - `vitest` (`npm run test`): 13 reducer tests (window add/remove/focus,
-  z-order, minimize/restore, maximize, immutability) + 7 cluster-client tests
-  (URL/query construction, envelope unwrapping, error handling, offline
-  fallback).
-- `playwright` (`npm run e2e`): 3 specs asserting the taskbar is pinned to the
-  bottom, the start menu opens above the taskbar and launches a window, and a
-  window closes via its title-bar control.
+  z-order, minimize/restore, maximize, immutability) + 19 cluster-client tests
+  (URL/query construction for every endpoint, envelope unwrapping, error
+  handling, offline fallback).
+- `playwright` (`npm run e2e`): 6 specs — the 3 desktop-shell contract specs
+  (taskbar pinned, start menu launches a window, close control) plus 3 Task
+  Manager specs (launch/title, an API-mocked cluster→namespace→pod-log
+  drill-down, and the offline empty-cluster message).
+- Go tests (`cd server && go test ./...`): handler tests over a stub
+  `ClusterClient`, offline `[]`-not-`null` assertions, 400/404/500 mapping,
+  `nodeStatus`/`nodeRoles` units, and a `client-go` fake-clientset test.
 - Gates: `tsc -b`, `eslint .`, `prettier --check .`, `vite build`,
-  `go build ./...`, `go vet ./...`, `govulncheck ./...` and `npm audit` must
-  all stay clean.
+  `go build ./...`, `go vet ./...`, `go test ./...`, `govulncheck ./...` and
+  `npm audit` must all stay clean.
 
 ## 7. Decision table
 

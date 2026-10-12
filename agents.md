@@ -26,7 +26,7 @@ preserved.
 | `src/components/` | Desktop shell (`Window`, `WindowApp`, `WindowManager`, `TaskBar`, `TaskBarWindows`, `TaskBarClock`, `StartMenu`, `Contextmenu`) + one CSS file each | Keep the desktop metaphor (rule 2). |
 | `src/components/ui/` | Local UI primitives that replaced `react-uwp` (`AppBarButton`, `Menu`, `Toggle`, `Icon`, `Tooltip`, `ListView`, …) + `ui.css` | Reuse these; do **not** add a UI-kit dependency. |
 | `src/theme/` | `tokens.css` design tokens + per-theme overrides, `theme.ts` (apply/persist) | All colours and sizes go through `--kos-*` tokens. |
-| `src/window-apps/` | Pluggable window "apps" (`TestWindow`, `ClusterExplorer`) and `registry.ts` | Register new apps in the registry. |
+| `src/window-apps/` | Pluggable window "apps" (`TestWindow`, `ClusterExplorer`, `TaskManager`) and `registry.ts` | Register new apps in the registry. |
 | `src/cluster/client.ts` | **The one** cluster integration point: the `ClusterClient` interface, `HttpClusterClient`, `OfflineClusterClient` | No `fetch` outside this file (rule 1). |
 | `src/assets/` | Logos and wallpapers | Keep; prefer SVG, compress raster assets. |
 | `server/` | Go API server (`k8s.io/client-go`) serving JSON under `/api` | See `server/README.md`. |
@@ -77,7 +77,7 @@ cd server && go run .            # listens on :8700 (PORT env)
 In development Vite proxies `/api` → `http://localhost:8700`, so run both. With
 no kubeconfig the server stays up and answers `{"source":"offline", ...}` with
 empty lists — the frontend then shows *"No clusters configured — start the Go
-server"* in Cluster Explorer.
+server"* in Cluster Explorer and Task Manager.
 
 ## Code style
 

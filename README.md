@@ -31,13 +31,20 @@ menu, focus-aware resizable windows and a right-click context menu form the shel
 "applications" running inside windows talk to a cluster through a single typed
 client layer.
 
-Planned / in progress:
+Shipped:
+
+- A **Task Manager** window app with multi-level drill-down: cluster → nodes →
+  node detail, and namespace → deployments / replica sets / replication
+  controllers / services / pods → pod logs.
+- Read-only cluster browsing behind the typed `ClusterClient`: clusters,
+  namespaces, nodes and node detail, pods (filtered by node, namespace or label
+  selector) and pod logs, all served by the Go API.
+
+Planned:
 
 - A package manager (Helm charts) that installs software into your cluster and
   integrates it with KuberneticOS.
-- Node / ReplicaSet / ReplicationController / Pod management.
-- A Kubernetes task manager with multi-level drill-down, launched from the
-  taskbar.
+- Write operations (create / scale / delete) for workloads and nodes.
 
 This project is specified in [`spec.md`](spec.md) and documented for contributors
 and AI agents in [`agents.md`](agents.md).
@@ -49,7 +56,7 @@ and AI agents in [`agents.md`](agents.md).
 | `src/` | The frontend: TypeScript + React 19 + Vite. Shell components, state model, window apps. |
 | `src/state/` | Immutable `DesktopState` reducer + typed event bus. |
 | `src/components/ui/` | Small local UI kit (buttons, menus, toggles, icons) that replaced the abandoned `react-uwp`. |
-| `src/window-apps/` | Pluggable window applications (e.g. TestWindow, ClusterExplorer). |
+| `src/window-apps/` | Pluggable window applications (TestWindow, ClusterExplorer, TaskManager). |
 | `src/theme/` | Design tokens + the Windows/macOS/GNOME/KDE theme slots. |
 | `src/cluster/` | The one typed cluster-client interface. |
 | `server/` | Go JSON API backed by [`k8s.io/client-go`](https://github.com/kubernetes/client-go). |

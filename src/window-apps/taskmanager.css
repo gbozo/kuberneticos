@@ -1,0 +1,252 @@
+/* Task Manager — window app, styled from the design tokens in src/theme/tokens.css */
+
+.kos-taskmanager {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  gap: 10px;
+  color: var(--kos-window-fg);
+  font-family: var(--kos-font-family);
+  font-size: 13px;
+}
+
+.kos-taskmanager__toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.kos-taskmanager__breadcrumbs {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.kos-taskmanager__crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.kos-taskmanager__crumb-button {
+  max-width: 160px;
+  padding: 2px 6px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--kos-muted);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.kos-taskmanager__crumb-button:hover {
+  background: var(--kos-hover);
+  color: var(--kos-window-fg);
+}
+
+.kos-taskmanager__crumb-button:focus-visible {
+  outline: var(--kos-focus-outline);
+  outline-offset: -2px;
+}
+
+.kos-taskmanager__crumb:last-child .kos-taskmanager__crumb-button {
+  color: var(--kos-window-fg);
+  font-weight: 600;
+}
+
+.kos-taskmanager__content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.kos-taskmanager__section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.kos-taskmanager__tabs {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 4px;
+}
+
+.kos-taskmanager__status {
+  margin: 8px 0;
+  color: var(--kos-muted);
+}
+
+.kos-taskmanager__status.is-error {
+  color: var(--kos-window-fg);
+  font-weight: 600;
+}
+
+.kos-taskmanager__row {
+  list-style: none;
+}
+
+.kos-taskmanager__row-button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.kos-taskmanager__row-button:hover {
+  background: var(--kos-hover);
+}
+
+.kos-taskmanager__row-button:focus-visible {
+  outline: var(--kos-focus-outline);
+  outline-offset: -2px;
+}
+
+.kos-taskmanager__row-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.kos-taskmanager__row-title {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.kos-taskmanager__row-meta {
+  color: var(--kos-muted);
+  font-size: 12px;
+}
+
+.kos-taskmanager__row-chevron {
+  flex: 0 0 auto;
+  opacity: 0.7;
+}
+
+.kos-taskmanager__detail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.kos-taskmanager__workloads {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.kos-taskmanager__section-title {
+  margin: 4px 0;
+  color: var(--kos-muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+}
+
+.kos-taskmanager__kv {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+}
+
+.kos-taskmanager__kv-row {
+  display: flex;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--kos-border);
+}
+
+.kos-taskmanager__kv-row dt {
+  flex: 0 0 40%;
+  color: var(--kos-muted);
+  overflow-wrap: anywhere;
+}
+
+.kos-taskmanager__kv-row dd {
+  flex: 1 1 auto;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.kos-taskmanager__logs-view {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.kos-taskmanager__logs-controls {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.kos-taskmanager__logs-controls .kos-autosuggest {
+  flex: 1 1 auto;
+}
+
+.kos-taskmanager__tail {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--kos-muted);
+  font-size: 12px;
+}
+
+.kos-taskmanager__tail-input {
+  box-sizing: border-box;
+  width: 96px;
+  padding: 6px 8px;
+  border: 1px solid var(--kos-input-border);
+  border-radius: 4px;
+  background: var(--kos-input-bg);
+  color: var(--kos-window-fg);
+  font: inherit;
+  font-size: 13px;
+}
+
+.kos-taskmanager__tail-input:focus-visible {
+  outline: var(--kos-focus-outline);
+  outline-offset: -1px;
+}
+
+.kos-taskmanager__logs {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 8px;
+  border: 1px solid var(--kos-border);
+  border-radius: var(--kos-window-radius);
+  background: var(--kos-input-bg);
+  color: var(--kos-window-fg);
+  font-family: var(--kos-font-family);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

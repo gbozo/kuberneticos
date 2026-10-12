@@ -1,4 +1,5 @@
 import { ClusterExplorer } from './ClusterExplorer';
+import { TaskManager } from './TaskManager';
 import { TestWindow } from './TestWindow';
 import type { WindowAppDefinition } from './types';
 
@@ -14,6 +15,12 @@ export const windowApps: readonly WindowAppDefinition[] = [
     title: 'Cluster Explorer',
     icon: 'server',
     component: ClusterExplorer,
+  },
+  {
+    id: 'TaskManager',
+    title: 'Task Manager',
+    icon: 'activity',
+    component: TaskManager,
   },
 ];
 

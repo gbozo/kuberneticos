@@ -1,7 +1,8 @@
 # KuberneticOS API server
 
 A small, stdlib-only Go HTTP server that exposes a JSON API for the
-KuberneticOS web desktop (clusters, nodes, pods). It replaces the deleted
+KuberneticOS web desktop (clusters, nodes, pods, namespaces, workloads and
+services). It replaces the deleted
 vendored `kubernetes-client/go` library with the modern, maintained
 [`k8s.io/client-go`](https://github.com/kubernetes/client-go).
 
@@ -37,12 +38,35 @@ All responses are JSON and CORS-enabled (`Access-Control-Allow-Origin: *`).
 | Method | Path | Response |
 |---|---|---|
 | `GET` | `/api/health` | `{"status":"ok","source":"live"\|"offline"}` |
-| `GET` | `/api/clusters` | `{"source":..., "clusters":[ClusterRef...]}` |
-| `GET` | `/api/nodes?cluster=<id>` | `{"source":..., "nodes":[Node...]}` |
-| `GET` | `/api/pods?cluster=<id>&node=<name>&namespace=<ns>` | `{"source":..., "pods":[Pod...]}` |
+| `GET` | `/api/clusters` | `{"source":...,"clusters":[ClusterRef...]}` |
+| `GET` | `/api/nodes?cluster=<id>` | `{"source":...,"nodes":[Node...]}` |
+| `GET` | `/api/nodes/detail?cluster=<id>&name=<node>` | `{"source":...,"node":{NodeDetail}}` |
+| `GET` | `/api/namespaces?cluster=<id>` | `{"source":...,"namespaces":[Namespace...]}` |
+| `GET` | `/api/pods?cluster=<id>&node=<name>&namespace=<ns>&selector=<labelSelector>` | `{"source":...,"pods":[Pod...]}` |
+| `GET` | `/api/pods/logs?cluster=<id>&namespace=<ns>&pod=<name>&container=<c>&tailLines=<n>` | `{"source":...,"logs":"<raw log text>"}` |
+| `GET` | `/api/deployments?cluster=<id>&namespace=<ns>` | `{"source":...,"deployments":[Deployment...]}` |
+| `GET` | `/api/replicasets?cluster=<id>&namespace=<ns>` | `{"source":...,"replicasets":[ReplicaSet...]}` |
+| `GET` | `/api/replicationcontrollers?cluster=<id>&namespace=<ns>` | `{"source":...,"replicationcontrollers":[ReplicationController...]}` |
+| `GET` | `/api/services?cluster=<id>&namespace=<ns>` | `{"source":...,"services":[Service...]}` |
 
-Errors are returned as `500` with a `{"error":"..."}` body. Unknown methods on a
-known path return `405`; `OPTIONS` is answered by the CORS middleware with `204`.
+Every response includes a `source` field (`"live"` or `"offline"`). All query
+parameters are optional unless noted; empty lists render as `[]`, never `null`.
+
+| Parameter | Used by | Meaning |
+|---|---|---|
+| `cluster` | all list/detail endpoints | Cluster identifier (echoed by the single configured client) |
+| `namespace` | pods, deployments, replicasets, replicationcontrollers, services, pods/logs | Namespace filter; all namespaces when omitted (list endpoints scope the API call) |
+| `node` | pods | Node name, forwarded as the `spec.nodeName` field selector |
+| `selector` | pods | Kubernetes label selector string (e.g. `app=web,tier=frontend`), forwarded as `ListOptions.LabelSelector` |
+| `name` | nodes/detail | **Required** node name; missing → `400` |
+| `pod` | pods/logs | Pod name |
+| `container` | pods/logs | Container name; omitted → the pod's default container |
+| `tailLines` | pods/logs | Lines to tail; integer, default `200`, clamped to `[1,5000]`; non-integer → `400` |
+
+Errors are returned as `{"error":"..."}`. Missing/invalid parameters return
+`400`; a Kubernetes `NotFound` error returns `404`; all other errors return
+`500`. Unknown methods on a known path return `405`; `OPTIONS` is answered by the
+CORS middleware with `204`.
 
 ### Types
 
@@ -55,6 +79,93 @@ known path return `405`; `OPTIONS` is answered by the CORS middleware with `204`
 
 // Pod
 { "name": "...", "namespace": "...", "node": "...", "phase": "Running" }
+
+// Replicas
+{ "desired": 3, "ready": 3, "available": 3, "updated": 3 }
+
+// Namespace
+{ "name": "default", "status": "Active" }
+
+// Deployment
+{ "name": "web", "namespace": "default", "replicas": { ...Replicas }, "images": ["nginx:1.27"] }
+
+// ReplicaSet (same minus images)
+{ "name": "web-abc", "namespace": "default", "replicas": { ...Replicas } }
+
+// ReplicationController (same minus images)
+{ "name": "legacy", "namespace": "default", "replicas": { ...Replicas } }
+
+// ServicePort
+{ "name": "http", "port": 80, "protocol": "TCP", "targetPort": "8080" }
+
+// Service
+{ "name": "web", "namespace": "default", "type": "ClusterIP", "clusterIP": "10.0.0.10", "ports": [ ...ServicePort ] }
+
+// NodeCondition / NodeAddress
+{ "type": "Ready", "status": "True" }
+{ "type": "InternalIP", "address": "10.0.0.1" }
+
+// NodeDetail
+{
+  "name": "n1",
+  "status": "Ready",
+  "roles": ["control-plane"],
+  "version": "v1.30.0",
+  "capacity": { "cpu": "4", "memory": "16Gi" },
+  "allocatable": { "cpu": "4", "memory": "16Gi" },
+  "conditions": [ { "type": "Ready", "status": "True" } ],
+  "addresses": [ { "type": "InternalIP", "address": "10.0.0.1" } ]
+}
+```
+
+> Note: `ReplicaSet` and `ReplicationController` have no "updated replicas"
+> status field, so their `replicas.updated` is always `0`. `Deployment` reports
+> `status.updatedReplicas`.
+
+### Sample responses
+
+```jsonc
+// GET /api/namespaces?cluster=default
+{ "source": "live", "namespaces": [ { "name": "default", "status": "Active" } ] }
+
+// GET /api/deployments?cluster=default&namespace=default
+{ "source": "live", "deployments": [
+  { "name": "web", "namespace": "default",
+    "replicas": { "desired": 3, "ready": 3, "available": 3, "updated": 3 },
+    "images": ["nginx:1.27"] }
+] }
+
+// GET /api/replicasets?cluster=default&namespace=default
+{ "source": "live", "replicasets": [
+  { "name": "web-abc", "namespace": "default",
+    "replicas": { "desired": 3, "ready": 3, "available": 3, "updated": 0 } }
+] }
+
+// GET /api/replicationcontrollers?cluster=default&namespace=default
+{ "source": "live", "replicationcontrollers": [
+  { "name": "legacy", "namespace": "default",
+    "replicas": { "desired": 2, "ready": 2, "available": 2, "updated": 0 } }
+] }
+
+// GET /api/services?cluster=default&namespace=default
+{ "source": "live", "services": [
+  { "name": "web", "namespace": "default", "type": "ClusterIP", "clusterIP": "10.0.0.10",
+    "ports": [ { "name": "http", "port": 80, "protocol": "TCP", "targetPort": "8080" } ] }
+] }
+
+// GET /api/nodes/detail?cluster=default&name=n1
+{ "source": "live", "node": {
+  "name": "n1", "status": "Ready", "roles": ["control-plane"], "version": "v1.30.0",
+  "capacity": { "cpu": "4", "memory": "16Gi" },
+  "allocatable": { "cpu": "4", "memory": "16Gi" },
+  "conditions": [ { "type": "Ready", "status": "True" } ],
+  "addresses": [ { "type": "InternalIP", "address": "10.0.0.1" } ] } }
+
+// GET /api/pods?cluster=default&namespace=default&selector=app%3Dweb
+{ "source": "live", "pods": [ { "name": "web-0", "namespace": "default", "node": "n1", "phase": "Running" } ] }
+
+// GET /api/pods/logs?cluster=default&namespace=default&pod=web-0&container=web&tailLines=200
+{ "source": "live", "logs": "2026-01-01T00:00:00Z serving on :8080\n" }
 ```
 
 ## Frontend integration

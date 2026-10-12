@@ -14,7 +14,8 @@ export type KosIconName =
   | 'terminal'
   | 'box'
   | 'server'
-  | 'chevron-right';
+  | 'chevron-right'
+  | 'activity';
 
 export interface IconProps {
   name: KosIconName;
@@ -180,6 +181,16 @@ const ICONS: Record<KosIconName, ReactNode> = {
   'chevron-right': (
     <path
       d="M9 6l6 6-6 6"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  ),
+  activity: (
+    <path
+      d="M22 12h-4l-3 9L9 3l-3 9H2"
       fill="none"
       stroke="currentColor"
       strokeWidth={2}

@@ -16,6 +16,8 @@ export interface PodInfo {
   namespace: string;
   node?: string;
   phase: string;
+  ownerKind?: string; // 'ReplicaSet' | 'ReplicationController' | 'StatefulSet' | ...
+  ownerName?: string;
 }
 
 export interface NamespaceInfo {
@@ -41,6 +43,8 @@ export interface ReplicaSetInfo {
   name: string;
   namespace: string;
   replicas: ReplicaCounts;
+  ownerKind?: string; // 'Deployment' | ...
+  ownerName?: string;
 }
 
 export interface ReplicationControllerInfo {
@@ -135,6 +139,59 @@ interface PodLogsResponse {
   readonly logs: string;
 }
 
+export interface ContainerMetrics {
+  readonly name: string;
+  readonly cpuMillis: number;
+  readonly memoryBytes: number;
+}
+
+export interface NodeMetrics {
+  readonly name: string;
+  readonly cpuMillis: number;
+  readonly memoryBytes: number;
+  readonly cpuAllocatableMillis?: number;
+  readonly memoryAllocatableBytes?: number;
+  readonly diskUsedBytes?: number;
+  readonly diskCapacityBytes?: number;
+  readonly networkRxBytes?: number;
+  readonly networkTxBytes?: number;
+  readonly podCount?: number;
+}
+
+export interface PodMetrics {
+  readonly name: string;
+  readonly namespace: string;
+  readonly node?: string;
+  readonly cpuMillis: number;
+  readonly memoryBytes: number;
+  readonly containers: readonly ContainerMetrics[];
+  readonly diskUsedBytes?: number;
+  readonly networkRxBytes?: number;
+  readonly networkTxBytes?: number;
+}
+
+export interface NodeMetricsResult {
+  readonly available: boolean;
+  readonly nodes: readonly NodeMetrics[];
+}
+
+export interface PodMetricsResult {
+  readonly available: boolean;
+  readonly pods: readonly PodMetrics[];
+}
+
+interface NodeMetricsResponse {
+  readonly source: string;
+  readonly available: boolean;
+  readonly nodes: readonly NodeMetrics[];
+}
+
+interface PodMetricsResponse {
+  readonly source: string;
+  readonly available: boolean;
+  readonly pods: readonly PodMetrics[];
+}
+
 export interface ClusterClient {
   listClusters(): Promise<readonly ClusterInfo[]>;
   listNodes(clusterId: string): Promise<readonly NodeInfo[]>;
@@ -160,6 +217,8 @@ export interface ClusterClient {
     container?: string,
     tailLines?: number,
   ): Promise<string>;
+  getNodeMetrics(clusterId: string): Promise<NodeMetricsResult>;
+  getPodMetrics(clusterId: string, namespace?: string): Promise<PodMetricsResult>;
 }
 
 export class OfflineClusterClient implements ClusterClient {
@@ -230,6 +289,14 @@ export class OfflineClusterClient implements ClusterClient {
     _tailLines?: number,
   ): Promise<string> {
     return '';
+  }
+
+  async getNodeMetrics(_clusterId: string): Promise<NodeMetricsResult> {
+    return { available: false, nodes: [] };
+  }
+
+  async getPodMetrics(_clusterId: string, _namespace?: string): Promise<PodMetricsResult> {
+    return { available: false, pods: [] };
   }
 }
 
@@ -344,6 +411,23 @@ export class HttpClusterClient implements ClusterClient {
       `${this.baseUrl}/pods/logs?${params.toString()}`,
     );
     return envelope.logs;
+  }
+
+  async getNodeMetrics(clusterId: string): Promise<NodeMetricsResult> {
+    const params = new URLSearchParams({ cluster: clusterId });
+    const envelope = await requestJson<NodeMetricsResponse>(
+      `${this.baseUrl}/metrics/nodes?${params.toString()}`,
+    );
+    return { available: envelope.available, nodes: envelope.nodes };
+  }
+
+  async getPodMetrics(clusterId: string, namespace?: string): Promise<PodMetricsResult> {
+    const params = new URLSearchParams({ cluster: clusterId });
+    if (namespace !== undefined && namespace !== '') params.set('namespace', namespace);
+    const envelope = await requestJson<PodMetricsResponse>(
+      `${this.baseUrl}/metrics/pods?${params.toString()}`,
+    );
+    return { available: envelope.available, pods: envelope.pods };
   }
 }
 

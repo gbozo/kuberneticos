@@ -251,6 +251,47 @@ describe('HttpClusterClient', () => {
     expect(url.searchParams.has('tailLines')).toBe(false);
   });
 
+  it('fetches /api/metrics/nodes and unwraps the metrics envelope', async () => {
+    const nodes = [{ name: 'n1', cpuMillis: 73, memoryBytes: 1054204 * 1024 }];
+    const fetchMock = stubFetch({ source: 'go', available: true, nodes });
+    const client = new HttpClusterClient();
+
+    const result = await client.getNodeMetrics('abc');
+
+    expect(result).toEqual({ available: true, nodes });
+    const url = requestedUrl(fetchMock);
+    expect(`${url.pathname}${url.search}`).toBe('/api/metrics/nodes?cluster=abc');
+  });
+
+  it('fetches /api/metrics/pods with optional namespace', async () => {
+    const pods = [
+      {
+        name: 'p1',
+        namespace: 'default',
+        cpuMillis: 10,
+        memoryBytes: 512 * 1024,
+        containers: [],
+      },
+    ];
+    const fetchMock1 = stubFetch({ source: 'go', available: true, pods });
+    const client = new HttpClusterClient();
+
+    const res1 = await client.getPodMetrics('abc');
+    expect(res1).toEqual({ available: true, pods });
+    expect(`${requestedUrl(fetchMock1).pathname}${requestedUrl(fetchMock1).search}`).toBe(
+      '/api/metrics/pods?cluster=abc',
+    );
+
+    const fetchMock2 = stubFetch({ source: 'go', available: true, pods });
+    const client2 = new HttpClusterClient();
+    const res2 = await client2.getPodMetrics('abc', 'default');
+    expect(res2).toEqual({ available: true, pods });
+    const url2 = requestedUrl(fetchMock2);
+    expect(`${url2.pathname}${url2.search}`).toBe(
+      '/api/metrics/pods?cluster=abc&namespace=default',
+    );
+  });
+
   it('rejects with the status when the response is not ok', async () => {
     const fetchMock = vi.fn<(input: string | URL, init?: RequestInit) => Promise<Response>>();
     fetchMock.mockResolvedValue({
@@ -308,6 +349,16 @@ describe('OfflineClusterClient', () => {
     const client = new OfflineClusterClient();
 
     await expect(client.getPodLogs('abc', 'default', 'p1')).resolves.toBe('');
+  });
+
+  it('returns available:false with empty arrays from metrics methods', async () => {
+    const client = new OfflineClusterClient();
+    await expect(client.getNodeMetrics('abc')).resolves.toEqual({ available: false, nodes: [] });
+    await expect(client.getPodMetrics('abc')).resolves.toEqual({ available: false, pods: [] });
+    await expect(client.getPodMetrics('abc', 'default')).resolves.toEqual({
+      available: false,
+      pods: [],
+    });
   });
 });
 

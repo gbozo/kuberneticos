@@ -66,6 +66,8 @@ type Pod struct {
 	Namespace string `json:"namespace"`
 	Node      string `json:"node"`
 	Phase     string `json:"phase"`
+	OwnerKind string `json:"ownerKind,omitempty"`
+	OwnerName string `json:"ownerName,omitempty"`
 }
 
 // Replicas is the API-facing view of a workload's replica counts.
@@ -95,6 +97,8 @@ type ReplicaSet struct {
 	Name      string   `json:"name"`
 	Namespace string   `json:"namespace"`
 	Replicas  Replicas `json:"replicas"`
+	OwnerKind string   `json:"ownerKind,omitempty"`
+	OwnerName string   `json:"ownerName,omitempty"`
 }
 
 // ReplicationController is the API-facing view of a replication controller.
@@ -145,6 +149,52 @@ type NodeDetail struct {
 	Addresses   []NodeAddress     `json:"addresses"`
 }
 
+// ContainerMetrics is the API-facing view of a single container's live usage.
+type ContainerMetrics struct {
+	Name        string `json:"name"`
+	CPUMillis   int64  `json:"cpuMillis"`
+	MemoryBytes int64  `json:"memoryBytes"`
+}
+
+// NodeMetrics is the API-facing view of live node resource usage.
+type NodeMetrics struct {
+	Name                   string `json:"name"`
+	CPUMillis              int64  `json:"cpuMillis"`
+	MemoryBytes            int64  `json:"memoryBytes"`
+	CPUAllocatableMillis   int64  `json:"cpuAllocatableMillis,omitempty"`
+	MemoryAllocatableBytes int64  `json:"memoryAllocatableBytes,omitempty"`
+	DiskUsedBytes          int64  `json:"diskUsedBytes,omitempty"`
+	DiskCapacityBytes      int64  `json:"diskCapacityBytes,omitempty"`
+	NetworkRxBytes         int64  `json:"networkRxBytes,omitempty"`
+	NetworkTxBytes         int64  `json:"networkTxBytes,omitempty"`
+	PodCount               int32  `json:"podCount,omitempty"`
+}
+
+// PodMetrics is the API-facing view of live pod resource usage.
+type PodMetrics struct {
+	Name           string             `json:"name"`
+	Namespace      string             `json:"namespace"`
+	Node           string             `json:"node,omitempty"`
+	CPUMillis      int64              `json:"cpuMillis"`
+	MemoryBytes    int64              `json:"memoryBytes"`
+	Containers     []ContainerMetrics `json:"containers"`
+	DiskUsedBytes  int64              `json:"diskUsedBytes,omitempty"`
+	NetworkRxBytes int64              `json:"networkRxBytes,omitempty"`
+	NetworkTxBytes int64              `json:"networkTxBytes,omitempty"`
+}
+
+// NodeMetricsResult carries node metrics plus their availability.
+type NodeMetricsResult struct {
+	Available bool          `json:"available"`
+	Nodes     []NodeMetrics `json:"nodes"`
+}
+
+// PodMetricsResult carries pod metrics plus their availability.
+type PodMetricsResult struct {
+	Available bool         `json:"available"`
+	Pods      []PodMetrics `json:"pods"`
+}
+
 // ClusterClient is the single seam between HTTP handlers and the cluster.
 type ClusterClient interface {
 	ListClusters(ctx context.Context) ([]ClusterRef, error)
@@ -157,6 +207,8 @@ type ClusterClient interface {
 	ListServices(ctx context.Context, clusterID, namespace string) ([]Service, error)
 	GetNode(ctx context.Context, clusterID, name string) (NodeDetail, error)
 	PodLogs(ctx context.Context, clusterID, namespace, pod, container string, tailLines int) (string, error)
+	GetNodeMetrics(ctx context.Context, clusterID string) (NodeMetricsResult, error)
+	GetPodMetrics(ctx context.Context, clusterID, namespace string) (PodMetricsResult, error)
 }
 
 // offlineClient is used whenever no Kubernetes configuration could be loaded.
@@ -208,6 +260,14 @@ func (offlineClient) GetNode(context.Context, string, string) (NodeDetail, error
 
 func (offlineClient) PodLogs(context.Context, string, string, string, string, int) (string, error) {
 	return "", nil
+}
+
+func (offlineClient) GetNodeMetrics(context.Context, string) (NodeMetricsResult, error) {
+	return NodeMetricsResult{Available: false, Nodes: []NodeMetrics{}}, nil
+}
+
+func (offlineClient) GetPodMetrics(context.Context, string, string) (PodMetricsResult, error) {
+	return PodMetricsResult{Available: false, Pods: []PodMetrics{}}, nil
 }
 
 // liveClient talks to a real cluster through a client-go clientset.
@@ -267,11 +327,14 @@ func (c *liveClient) ListPods(ctx context.Context, _, node, namespace, selector 
 	pods := make([]Pod, 0, len(list.Items))
 	for i := range list.Items {
 		p := &list.Items[i]
+		ownerKind, ownerName := controllerOwner(p.OwnerReferences)
 		pods = append(pods, Pod{
 			Name:      p.Name,
 			Namespace: p.Namespace,
 			Node:      p.Spec.NodeName,
 			Phase:     string(p.Status.Phase),
+			OwnerKind: ownerKind,
+			OwnerName: ownerName,
 		})
 	}
 	return pods, nil
@@ -328,6 +391,7 @@ func (c *liveClient) ListReplicaSets(ctx context.Context, _, namespace string) (
 		rs := &list.Items[i]
 		// ReplicaSetStatus has no "updated replicas" field (unlike Deployment),
 		// so Updated is reported as 0 rather than reusing an unrelated counter.
+		ownerKind, ownerName := controllerOwner(rs.OwnerReferences)
 		replicaSets = append(replicaSets, ReplicaSet{
 			Name:      rs.Name,
 			Namespace: rs.Namespace,
@@ -337,6 +401,8 @@ func (c *liveClient) ListReplicaSets(ctx context.Context, _, namespace string) (
 				Available: rs.Status.AvailableReplicas,
 				Updated:   0,
 			},
+			OwnerKind: ownerKind,
+			OwnerName: ownerName,
 		})
 	}
 	return replicaSets, nil
@@ -457,6 +523,19 @@ func (c *liveClient) PodLogs(ctx context.Context, _, namespace, pod, container s
 	return string(data), nil
 }
 
+// GetNodeMetrics is a Phase 0 stub. The real metrics-server integration
+// (k8s.io/metrics + kubelet Summary API) lands in Phase 1 task S1; until then
+// this reports metrics as unavailable with a non-nil empty slice so the API
+// never returns "null".
+func (c *liveClient) GetNodeMetrics(context.Context, string) (NodeMetricsResult, error) {
+	return NodeMetricsResult{Available: false, Nodes: []NodeMetrics{}}, nil
+}
+
+// GetPodMetrics is a Phase 0 stub; see GetNodeMetrics for the Phase 1 plan.
+func (c *liveClient) GetPodMetrics(context.Context, string, string) (PodMetricsResult, error) {
+	return PodMetricsResult{Available: false, Pods: []PodMetrics{}}, nil
+}
+
 // replicasFrom builds a Replicas view from a desired pointer plus status counts.
 func replicasFrom(desired *int32, ready, available, updated int32) Replicas {
 	return Replicas{
@@ -482,6 +561,18 @@ func quantityMap(in corev1.ResourceList) map[string]string {
 		out[string(name)] = quantity.String()
 	}
 	return out
+}
+
+// controllerOwner picks the managing controller from a resource's owner
+// references, preferring the entry flagged as the controller. It returns empty
+// strings when no controller owner exists (e.g. a standalone pod).
+func controllerOwner(refs []metav1.OwnerReference) (kind, name string) {
+	for i := range refs {
+		if refs[i].Controller != nil && *refs[i].Controller {
+			return refs[i].Kind, refs[i].Name
+		}
+	}
+	return "", ""
 }
 
 // nodeStatus derives a human-readable status from the node's Ready condition.
@@ -569,6 +660,18 @@ type nodeDetailResponse struct {
 type podLogsResponse struct {
 	Source string `json:"source"`
 	Logs   string `json:"logs"`
+}
+
+type nodeMetricsResponse struct {
+	Source    string        `json:"source"`
+	Available bool          `json:"available"`
+	Nodes     []NodeMetrics `json:"nodes"`
+}
+
+type podMetricsResponse struct {
+	Source    string       `json:"source"`
+	Available bool         `json:"available"`
+	Pods      []PodMetrics `json:"pods"`
 }
 
 type errorResponse struct {
@@ -712,6 +815,33 @@ func (a *api) handlePodLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, podLogsResponse{Source: a.source, Logs: logs})
 }
 
+func (a *api) handleMetricsNodes(w http.ResponseWriter, r *http.Request) {
+	result, err := a.client.GetNodeMetrics(r.Context(), r.URL.Query().Get("cluster"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	nodes := result.Nodes
+	if nodes == nil {
+		nodes = []NodeMetrics{}
+	}
+	writeJSON(w, http.StatusOK, nodeMetricsResponse{Source: a.source, Available: result.Available, Nodes: nodes})
+}
+
+func (a *api) handleMetricsPods(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	result, err := a.client.GetPodMetrics(r.Context(), query.Get("cluster"), query.Get("namespace"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	pods := result.Pods
+	if pods == nil {
+		pods = []PodMetrics{}
+	}
+	writeJSON(w, http.StatusOK, podMetricsResponse{Source: a.source, Available: result.Available, Pods: pods})
+}
+
 // newMux wires the method-aware routes (Go 1.22+ patterns).
 func newMux(a *api) *http.ServeMux {
 	mux := http.NewServeMux()
@@ -721,6 +851,8 @@ func newMux(a *api) *http.ServeMux {
 	mux.HandleFunc("GET /api/nodes/detail", a.handleNodeDetail)
 	mux.HandleFunc("GET /api/pods", a.handlePods)
 	mux.HandleFunc("GET /api/pods/logs", a.handlePodLogs)
+	mux.HandleFunc("GET /api/metrics/nodes", a.handleMetricsNodes)
+	mux.HandleFunc("GET /api/metrics/pods", a.handleMetricsPods)
 	mux.HandleFunc("GET /api/namespaces", a.handleNamespaces)
 	mux.HandleFunc("GET /api/deployments", a.handleDeployments)
 	mux.HandleFunc("GET /api/replicasets", a.handleReplicaSets)

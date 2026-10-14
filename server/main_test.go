@@ -33,6 +33,8 @@ type stubClient struct {
 	services    []Service
 	node        NodeDetail
 	logs        string
+	nodeMetrics NodeMetricsResult
+	podMetrics  PodMetricsResult
 	err         error
 
 	gotCluster   string
@@ -121,6 +123,22 @@ func (s *stubClient) PodLogs(_ context.Context, clusterID, namespace, pod, conta
 		return "", s.err
 	}
 	return s.logs, nil
+}
+
+func (s *stubClient) GetNodeMetrics(_ context.Context, clusterID string) (NodeMetricsResult, error) {
+	s.gotCluster = clusterID
+	if s.err != nil {
+		return NodeMetricsResult{}, s.err
+	}
+	return s.nodeMetrics, nil
+}
+
+func (s *stubClient) GetPodMetrics(_ context.Context, clusterID, namespace string) (PodMetricsResult, error) {
+	s.gotCluster, s.gotNamespace = clusterID, namespace
+	if s.err != nil {
+		return PodMetricsResult{}, s.err
+	}
+	return s.podMetrics, nil
 }
 
 func serve(t *testing.T, client ClusterClient, method, target string) *httptest.ResponseRecorder {

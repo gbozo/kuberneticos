@@ -1,28 +1,38 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+// Task Manager 2.0 shell (Phase 4, G1).
+//
+// Polling decision: each page owns its own `usePolledMetrics` loop (V1/V2/V4 call it
+// directly) because tasks.md §7 forbids G1 from editing other tasks' files; the shell
+// additionally calls `usePolledMetrics` for the hero totals. Keep the shell hook call
+// only inside <Hero> so it only runs on the workloads/performance pages.
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactElement,
+} from 'react';
 import { clusterClient } from '../cluster/client';
-import type {
-  DeploymentInfo,
-  NamespaceInfo,
-  NodeDetailInfo,
-  NodeInfo,
-  PodInfo,
-  ReplicaSetInfo,
-  ReplicationControllerInfo,
-  ServiceInfo,
-} from '../cluster/client';
-import { AppBarButton, AutoSuggestBox, Icon, ListView, Tooltip } from '../components/ui';
+import type { NamespaceInfo, NodeInfo, NodeMetrics } from '../cluster/client';
+import { Icon, type KosIconName } from '../components/ui';
+import { Gauge } from './taskmanagerCharts';
+import { TaskManagerCommandBar } from './taskmanagerCommandBar';
+import { useLocalPref, usePolledMetrics } from './taskmanagerHooks';
+import {
+  DEFAULT_TASK_MANAGER_PAGE,
+  DEFAULT_UPDATE_SPEED,
+  type NamespaceFilter,
+  type TaskManagerPage,
+  type TaskManagerViewProps,
+  type UpdateSpeed,
+} from './taskmanagerTypes';
+import { InventoryView, PerformanceView, ProcessesView, ServicesView } from './taskmanagerViews';
 import type { WindowAppProps } from './types';
 import './taskmanager.css';
+import './taskmanagerViews.css';
 
 type AsyncState<T> =
   { status: 'loading' } | { status: 'ready'; data: T } | { status: 'error'; message: string };
-
-type View =
-  | { kind: 'clusters' }
-  | { kind: 'cluster'; clusterId: string; section: 'nodes' | 'namespaces' }
-  | { kind: 'node'; clusterId: string; nodeName: string }
-  | { kind: 'namespace'; clusterId: string; namespace: string }
-  | { kind: 'pod'; clusterId: string; namespace: string; podName: string };
 
 function useLoaded<T>(key: string, load: () => Promise<T>): AsyncState<T> {
   const loadRef = useRef(load);
@@ -53,518 +63,334 @@ function useLoaded<T>(key: string, load: () => Promise<T>): AsyncState<T> {
   return state;
 }
 
-interface RowItem {
-  key: string;
-  title: string;
-  meta?: string;
-  onClick: () => void;
+interface RailItem {
+  readonly id: TaskManagerPage;
+  readonly label: string;
+  readonly icon: KosIconName;
 }
 
-function Row({ item }: { item: RowItem }) {
-  return (
-    <li className="kos-taskmanager__row">
-      <button type="button" className="kos-taskmanager__row-button" onClick={item.onClick}>
-        <span className="kos-taskmanager__row-main">
-          <span className="kos-taskmanager__row-title">{item.title}</span>
-          {item.meta ? (
-            <>
-              {' '}
-              <span className="kos-taskmanager__row-meta">{item.meta}</span>
-            </>
-          ) : null}
-        </span>
-        <Icon name="chevron-right" size={14} className="kos-taskmanager__row-chevron" />
-      </button>
-    </li>
-  );
-}
+const RAIL_ITEMS: readonly RailItem[] = [
+  { id: 'workloads', label: 'Workloads', icon: 'layers' },
+  { id: 'performance', label: 'Performance', icon: 'graph' },
+  { id: 'services', label: 'Services', icon: 'plug' },
+  { id: 'pods', label: 'Pods', icon: 'pod' },
+  { id: 'namespaces', label: 'Namespaces', icon: 'folder' },
+  { id: 'nodes', label: 'Nodes', icon: 'server' },
+];
 
-function AsyncList<T>({
-  state,
-  emptyText,
-  toRow,
-}: {
-  state: AsyncState<readonly T[]>;
-  emptyText: string;
-  toRow: (item: T) => RowItem;
-}) {
-  if (state.status === 'loading') {
-    return <p className="kos-taskmanager__status">Loading…</p>;
-  }
-  if (state.status === 'error') {
-    return <p className="kos-taskmanager__status is-error">{state.message}</p>;
-  }
-  if (state.data.length === 0) {
-    return <p className="kos-taskmanager__status">{emptyText}</p>;
-  }
-  return (
-    <ListView>
-      {state.data.map((item) => {
-        const row = toRow(item);
-        return <Row key={row.key} item={row} />;
-      })}
-    </ListView>
-  );
-}
+const SETTINGS_ITEM: RailItem = { id: 'settings', label: 'Settings', icon: 'settings' };
 
-function KeyValueList({ entries }: { entries: readonly (readonly [string, string])[] }) {
-  if (entries.length === 0) {
-    return <p className="kos-taskmanager__status">None</p>;
-  }
-  return (
-    <dl className="kos-taskmanager__kv">
-      {entries.map(([key, value]) => (
-        <div className="kos-taskmanager__kv-row" key={key}>
-          <dt>{key}</dt>
-          <dd>{value}</dd>
-        </div>
-      ))}
-    </dl>
-  );
-}
+const PAGE_ORDER: readonly TaskManagerPage[] = [...RAIL_ITEMS.map((item) => item.id), 'settings'];
 
-function NodeDetailView({ clusterId, nodeName }: { clusterId: string; nodeName: string }) {
-  const state = useLoaded(`node:${clusterId}:${nodeName}`, () =>
-    clusterClient.getNode(clusterId, nodeName),
-  );
-
-  if (state.status === 'loading') {
-    return <p className="kos-taskmanager__status">Loading node details…</p>;
-  }
-  if (state.status === 'error') {
-    return <p className="kos-taskmanager__status is-error">{state.message}</p>;
-  }
-
-  const node = state.data as NodeDetailInfo;
-  return (
-    <div className="kos-taskmanager__detail">
-      <section>
-        <h3 className="kos-taskmanager__section-title">Overview</h3>
-        <KeyValueList
-          entries={[
-            ['Name', node.name],
-            ['Status', node.status],
-            ['Roles', node.roles.join(', ')],
-            ['Version', node.version],
-          ]}
-        />
-      </section>
-      <section>
-        <h3 className="kos-taskmanager__section-title">Capacity</h3>
-        <KeyValueList entries={Object.entries(node.capacity)} />
-      </section>
-      <section>
-        <h3 className="kos-taskmanager__section-title">Allocatable</h3>
-        <KeyValueList entries={Object.entries(node.allocatable)} />
-      </section>
-      <section>
-        <h3 className="kos-taskmanager__section-title">Conditions</h3>
-        <KeyValueList
-          entries={node.conditions.map((condition) => [condition.type, condition.status])}
-        />
-      </section>
-      <section>
-        <h3 className="kos-taskmanager__section-title">Addresses</h3>
-        <KeyValueList entries={node.addresses.map((address) => [address.type, address.address])} />
-      </section>
-    </div>
-  );
-}
-
-interface NamespaceWorkloads {
-  deployments: readonly DeploymentInfo[];
-  replicaSets: readonly ReplicaSetInfo[];
-  controllers: readonly ReplicationControllerInfo[];
-  services: readonly ServiceInfo[];
-  pods: readonly PodInfo[];
-}
-
-function NamespaceView({
-  clusterId,
-  namespace,
-  onSelectPod,
-}: {
-  clusterId: string;
-  namespace: string;
-  onSelectPod: (pod: string) => void;
-}) {
-  const state = useLoaded(`namespace:${clusterId}:${namespace}`, () =>
-    Promise.all([
-      clusterClient.listDeployments(clusterId, namespace),
-      clusterClient.listReplicaSets(clusterId, namespace),
-      clusterClient.listReplicationControllers(clusterId, namespace),
-      clusterClient.listServices(clusterId, namespace),
-      clusterClient.listPods(clusterId, undefined, namespace),
-    ]).then(([deployments, replicaSets, controllers, services, pods]): NamespaceWorkloads => ({
-      deployments,
-      replicaSets,
-      controllers,
-      services,
-      pods,
-    })),
-  );
-
-  if (state.status === 'loading') {
-    return <p className="kos-taskmanager__status">Loading namespace workloads…</p>;
-  }
-  if (state.status === 'error') {
-    return <p className="kos-taskmanager__status is-error">{state.message}</p>;
-  }
-
-  const { deployments, replicaSets, controllers, services, pods } = state.data;
-  const replicasMeta = (replicas: { desired: number; ready: number }): string =>
-    `${replicas.ready}/${replicas.desired} ready`;
-
-  return (
-    <div className="kos-taskmanager__workloads">
-      <section>
-        <h3 className="kos-taskmanager__section-title">Deployments</h3>
-        <AsyncList
-          state={{ status: 'ready', data: deployments }}
-          emptyText="No deployments"
-          toRow={(deployment) => ({
-            key: deployment.name,
-            title: deployment.name,
-            meta: replicasMeta(deployment.replicas),
-            onClick: () => undefined,
-          })}
-        />
-      </section>
-      <section>
-        <h3 className="kos-taskmanager__section-title">Replica sets</h3>
-        <AsyncList
-          state={{ status: 'ready', data: replicaSets }}
-          emptyText="No replica sets"
-          toRow={(replicaSet) => ({
-            key: replicaSet.name,
-            title: replicaSet.name,
-            meta: replicasMeta(replicaSet.replicas),
-            onClick: () => undefined,
-          })}
-        />
-      </section>
-      <section>
-        <h3 className="kos-taskmanager__section-title">Replication controllers</h3>
-        <AsyncList
-          state={{ status: 'ready', data: controllers }}
-          emptyText="No replication controllers"
-          toRow={(controller) => ({
-            key: controller.name,
-            title: controller.name,
-            meta: replicasMeta(controller.replicas),
-            onClick: () => undefined,
-          })}
-        />
-      </section>
-      <section>
-        <h3 className="kos-taskmanager__section-title">Services</h3>
-        <AsyncList
-          state={{ status: 'ready', data: services }}
-          emptyText="No services"
-          toRow={(service) => ({
-            key: service.name,
-            title: service.name,
-            meta: `${service.type} ${service.clusterIP}`,
-            onClick: () => undefined,
-          })}
-        />
-      </section>
-      <section>
-        <h3 className="kos-taskmanager__section-title">Pods</h3>
-        <AsyncList
-          state={{ status: 'ready', data: pods }}
-          emptyText="No pods"
-          toRow={(pod) => ({
-            key: pod.name,
-            title: pod.name,
-            meta: pod.node ?? pod.phase,
-            onClick: () => onSelectPod(pod.name),
-          })}
-        />
-      </section>
-    </div>
-  );
-}
-
-function PodLogsView({
-  clusterId,
-  namespace,
-  podName,
-}: {
-  clusterId: string;
-  namespace: string;
-  podName: string;
-}) {
-  const [container, setContainer] = useState('');
-  const [tailLines, setTailLines] = useState(200);
-  const state = useLoaded(
-    `logs:${clusterId}:${namespace}:${podName}:${container}:${tailLines}`,
-    () =>
-      clusterClient.getPodLogs(
-        clusterId,
-        namespace,
-        podName,
-        container === '' ? undefined : container,
-        tailLines,
-      ),
-  );
-
-  const handleTailChange = (value: string) => {
-    const parsed = Number(value);
-    setTailLines(Number.isFinite(parsed) && parsed >= 0 ? parsed : 0);
-  };
-
-  return (
-    <div className="kos-taskmanager__logs-view">
-      <div className="kos-taskmanager__logs-controls">
-        <AutoSuggestBox
-          placeholder="Container (optional)"
-          value={container}
-          onChange={setContainer}
-        />
-        <label className="kos-taskmanager__tail">
-          Tail lines
-          <input
-            className="kos-taskmanager__tail-input"
-            type="number"
-            min={0}
-            value={tailLines}
-            onChange={(event) => handleTailChange(event.target.value)}
-          />
-        </label>
-      </div>
-      {state.status === 'loading' ? (
-        <p className="kos-taskmanager__status">Loading logs…</p>
-      ) : state.status === 'error' ? (
-        <p className="kos-taskmanager__status is-error">{state.message}</p>
-      ) : state.data === '' ? (
-        <p className="kos-taskmanager__status">No logs available</p>
-      ) : (
-        <pre className="kos-taskmanager__logs">{state.data}</pre>
-      )}
-    </div>
-  );
-}
-
-function ClustersView({
-  state,
+function RailButton({
+  item,
+  active,
   onSelect,
 }: {
-  state: AsyncState<readonly { id: string; name: string; server: string }[]>;
-  onSelect: (clusterId: string) => void;
-}) {
-  if (state.status === 'loading') {
-    return <p className="kos-taskmanager__status">Loading clusters…</p>;
-  }
-  if (state.status === 'error' || state.data.length === 0) {
-    return <p className="kos-taskmanager__status">No clusters configured — start the Go server</p>;
-  }
+  readonly item: RailItem;
+  readonly active: boolean;
+  readonly onSelect: () => void;
+}): ReactElement {
   return (
-    <ListView>
-      {state.data.map((cluster) => (
-        <Row
-          key={cluster.id}
-          item={{
-            key: cluster.id,
-            title: cluster.name,
-            meta: cluster.server,
-            onClick: () => onSelect(cluster.id),
-          }}
-        />
-      ))}
-    </ListView>
+    <button
+      type="button"
+      role="tab"
+      aria-selected={active}
+      className={active ? 'kos-taskmanager__rail-item is-active' : 'kos-taskmanager__rail-item'}
+      onClick={onSelect}
+    >
+      <Icon name={item.icon} size={16} />
+      <span className="kos-taskmanager__rail-label">{item.label}</span>
+    </button>
   );
 }
 
-export function TaskManager(_props: WindowAppProps) {
-  const [stack, setStack] = useState<readonly View[]>([{ kind: 'clusters' }]);
-  const clusters = useLoaded('clusters', () => clusterClient.listClusters());
-  const current = stack[stack.length - 1];
+function HeroGauge({
+  label,
+  used,
+  max,
+  available,
+}: {
+  readonly label: string;
+  readonly used: number;
+  readonly max: number;
+  readonly available: boolean;
+}): ReactElement {
+  if (!available || !Number.isFinite(max) || max <= 0) {
+    return (
+      <div className="kos-taskmanager__gauge" role="img" aria-label={`${label}: unavailable`}>
+        <span className="kos-taskmanager__gauge-value">{'\u2014'}</span>
+        <span className="kos-taskmanager__gauge-label">{label}</span>
+      </div>
+    );
+  }
+  return <Gauge value={used} max={max} label={label} />;
+}
 
-  const push = (view: View) => setStack((prev) => [...prev, view]);
-  const pop = () => setStack((prev) => (prev.length > 1 ? prev.slice(0, -1) : prev));
-  const setClusterSection = (section: 'nodes' | 'namespaces') => {
-    setStack((prev) => {
-      const last = prev[prev.length - 1];
-      if (prev.length === 0 || last.kind !== 'cluster') return prev;
-      const next: View = { kind: 'cluster', clusterId: last.clusterId, section };
-      return [...prev.slice(0, -1), next];
-    });
-  };
+interface HeroProps {
+  readonly clusterId?: string;
+  readonly clusterName?: string;
+  readonly namespace: NamespaceFilter;
+  readonly updateSpeed: UpdateSpeed;
+}
+
+function Hero({ clusterId, clusterName, namespace, updateSpeed }: HeroProps): ReactElement {
+  const nodeState = useLoaded(`hero-nodes:${clusterId ?? ''}`, () =>
+    clusterId === undefined
+      ? Promise.resolve([] as readonly NodeInfo[])
+      : clusterClient.listNodes(clusterId),
+  );
+  const metrics = usePolledMetrics({
+    clusterId,
+    namespace: namespace === null ? undefined : namespace,
+    updateSpeed,
+  });
+
+  const nodes = nodeState.status === 'ready' ? nodeState.data : [];
+  const version = nodes.find((node) => node.version !== undefined && node.version !== '')?.version;
+
+  const total = (pick: (node: NodeMetrics) => number | undefined): number =>
+    metrics.nodes.reduce((sum, node) => sum + (pick(node) ?? 0), 0);
+
+  const gauges: readonly { label: string; used: number; max: number }[] = [
+    {
+      label: 'CPU',
+      used: total((node) => node.cpuMillis),
+      max: total((node) => node.cpuAllocatableMillis),
+    },
+    {
+      label: 'Memory',
+      used: total((node) => node.memoryBytes),
+      max: total((node) => node.memoryAllocatableBytes),
+    },
+    {
+      label: 'Disk',
+      used: total((node) => node.diskUsedBytes),
+      max: total((node) => node.diskCapacityBytes),
+    },
+  ];
+
+  return (
+    <section className="kos-taskmanager__hero" aria-label="Cluster overview">
+      <div className="kos-taskmanager__hero-info">
+        <h2 className="kos-taskmanager__hero-title">{clusterName ?? clusterId ?? 'Cluster'}</h2>
+        <dl className="kos-taskmanager__hero-meta">
+          <div className="kos-taskmanager__hero-meta-item">
+            <dt>Version</dt>
+            <dd>{version ?? '\u2014'}</dd>
+          </div>
+          <div className="kos-taskmanager__hero-meta-item">
+            <dt>Nodes</dt>
+            <dd>{nodes.length}</dd>
+          </div>
+        </dl>
+      </div>
+      <div className="kos-taskmanager__hero-gauges">
+        {gauges.map((gauge) => (
+          <HeroGauge
+            key={gauge.label}
+            label={gauge.label}
+            used={gauge.used}
+            max={gauge.max}
+            available={metrics.available}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+export function TaskManager(_props: WindowAppProps): ReactElement {
+  const [page, setPage] = useLocalPref<TaskManagerPage>('kos.tm.page', DEFAULT_TASK_MANAGER_PAGE);
+  const [updateSpeed, setUpdateSpeed] = useLocalPref<UpdateSpeed>(
+    'kos.tm.updateSpeed',
+    DEFAULT_UPDATE_SPEED,
+  );
+  const [namespace, setNamespace] = useLocalPref<NamespaceFilter>('kos.tm.namespace', null);
+  const [railCollapsed, setRailCollapsed] = useLocalPref<boolean>('kos.tm.railCollapsed', false);
+  const [refreshNonce, setRefreshNonce] = useState(0);
+  const [clusterId, setClusterId] = useState<string | undefined>(undefined);
+
+  const clusters = useLoaded('clusters', () => clusterClient.listClusters());
+  const namespaces = useLoaded(`namespaces:${clusterId ?? ''}`, () =>
+    clusterId === undefined
+      ? Promise.resolve([] as readonly NamespaceInfo[])
+      : clusterClient.listNamespaces(clusterId),
+  );
 
   useEffect(() => {
-    if (clusters.status !== 'ready' || clusters.data.length !== 1) return;
-    setStack((prev) => {
-      if (prev.length > 1) return prev;
-      return [...prev, { kind: 'cluster', clusterId: clusters.data[0].id, section: 'nodes' }];
+    if (clusters.status !== 'ready' || clusters.data.length === 0) return;
+    setClusterId((prev) => {
+      if (prev !== undefined && clusters.data.some((cluster) => cluster.id === prev)) return prev;
+      return clusters.data[0].id;
     });
   }, [clusters]);
 
-  const clusterName = (clusterId: string): string => {
-    if (clusters.status === 'ready') {
-      const match = clusters.data.find((cluster) => cluster.id === clusterId);
-      if (match) return match.name;
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (!event.ctrlKey || event.key !== 'Tab') return;
+      event.preventDefault();
+      const index = PAGE_ORDER.indexOf(page);
+      const next = PAGE_ORDER[(index + 1) % PAGE_ORDER.length] ?? DEFAULT_TASK_MANAGER_PAGE;
+      setPage(next);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [page, setPage]);
+
+  const handleRailKeyDown = (event: ReactKeyboardEvent<HTMLElement>): void => {
+    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+    const items = Array.from(
+      event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    );
+    if (items.length === 0) return;
+    event.preventDefault();
+    const currentIndex = items.findIndex((item) => item === document.activeElement);
+    if (currentIndex === -1) {
+      items[0].focus();
+      return;
     }
-    return clusterId;
+    const step = event.key === 'ArrowDown' ? 1 : -1;
+    items[(currentIndex + step + items.length) % items.length].focus();
   };
 
-  const crumbs = stack.map((view, index) => ({
-    label:
-      view.kind === 'clusters'
-        ? 'Clusters'
-        : view.kind === 'cluster'
-          ? clusterName(view.clusterId)
-          : view.kind === 'node'
-            ? view.nodeName
-            : view.kind === 'namespace'
-              ? view.namespace
-              : view.podName,
-    target: index + 1,
-  }));
-  const activateCrumb = (target: number) =>
-    setStack((prev) => (target === 0 ? [{ kind: 'clusters' }] : prev.slice(0, target)));
+  const handleNamespaceChange = (event: ChangeEvent<HTMLSelectElement>): void => {
+    setNamespace(event.target.value === 'all' ? null : event.target.value);
+  };
 
-  let content: ReactNode;
-  if (current.kind === 'clusters') {
-    content = (
-      <ClustersView
-        state={clusters}
-        onSelect={(clusterId) => push({ kind: 'cluster', clusterId, section: 'nodes' })}
-      />
-    );
-  } else if (current.kind === 'cluster') {
-    content = (
-      <div className="kos-taskmanager__section">
-        <div className="kos-taskmanager__tabs">
-          <AppBarButton
-            label="Nodes"
-            active={current.section === 'nodes'}
-            onClick={() => setClusterSection('nodes')}
-            title="List nodes"
-          />
-          <AppBarButton
-            label="Namespaces"
-            active={current.section === 'namespaces'}
-            onClick={() => setClusterSection('namespaces')}
-            title="List namespaces"
-          />
-        </div>
-        {current.section === 'nodes' ? (
-          <ClusterNodesView
-            clusterId={current.clusterId}
-            onSelectNode={(nodeName) =>
-              push({ kind: 'node', clusterId: current.clusterId, nodeName })
-            }
-          />
-        ) : (
-          <ClusterNamespacesView
-            clusterId={current.clusterId}
-            onSelectNamespace={(namespace) =>
-              push({ kind: 'namespace', clusterId: current.clusterId, namespace })
-            }
-          />
-        )}
-      </div>
-    );
-  } else if (current.kind === 'node') {
-    content = <NodeDetailView clusterId={current.clusterId} nodeName={current.nodeName} />;
-  } else if (current.kind === 'namespace') {
-    content = (
-      <NamespaceView
-        clusterId={current.clusterId}
-        namespace={current.namespace}
-        onSelectPod={(pod) =>
-          push({
-            kind: 'pod',
-            clusterId: current.clusterId,
-            namespace: current.namespace,
-            podName: pod,
-          })
-        }
-      />
-    );
-  } else {
-    content = (
-      <PodLogsView
-        clusterId={current.clusterId}
-        namespace={current.namespace}
-        podName={current.podName}
-      />
-    );
-  }
+  const handleClusterChange = (event: ChangeEvent<HTMLSelectElement>): void => {
+    setClusterId(event.target.value);
+  };
+
+  const clusterName =
+    clusters.status === 'ready'
+      ? clusters.data.find((cluster) => cluster.id === clusterId)?.name
+      : undefined;
+  const hasMultipleClusters = clusters.status === 'ready' && clusters.data.length > 1;
+
+  const viewProps: TaskManagerViewProps = { clusterId, namespace, updateSpeed };
+  const showHero = page === 'workloads' || page === 'performance';
+
+  // Re-keying the page forces a remount (and therefore a refetch) on Refresh.
+  const pageKey = `${page}:${refreshNonce}`;
+  const renderPage = (): ReactElement => {
+    switch (page) {
+      case 'workloads':
+        return <ProcessesView key={pageKey} {...viewProps} />;
+      case 'performance':
+        return <PerformanceView key={pageKey} {...viewProps} />;
+      case 'services':
+        return <ServicesView key={pageKey} {...viewProps} />;
+      default:
+        return <InventoryView key={pageKey} {...viewProps} page={page} />;
+    }
+  };
+
+  const namespaceOptions = namespaces.status === 'ready' ? namespaces.data : [];
 
   return (
-    <div className="kos-taskmanager">
-      <header className="kos-taskmanager__toolbar">
-        {stack.length > 1 ? (
-          <Tooltip content="Go back">
-            <AppBarButton label="Back" onClick={pop} title="Go back" />
-          </Tooltip>
-        ) : null}
-        <nav className="kos-taskmanager__breadcrumbs" aria-label="Breadcrumb">
-          {crumbs.map((crumb, index) => (
-            <span className="kos-taskmanager__crumb" key={crumb.target}>
-              {index > 0 ? <Icon name="chevron-right" size={12} /> : null}
-              <button
-                type="button"
-                className="kos-taskmanager__crumb-button"
-                onClick={() => activateCrumb(crumb.target)}
-              >
-                {crumb.label}
-              </button>
-            </span>
-          ))}
+    <div className="kos-taskmanager" data-collapsed={railCollapsed}>
+      <div className="kos-taskmanager__body">
+        <nav
+          className="kos-taskmanager__rail"
+          role="tablist"
+          aria-orientation="vertical"
+          aria-label="Task Manager"
+          onKeyDown={handleRailKeyDown}
+        >
+          <button
+            type="button"
+            className="kos-taskmanager__rail-toggle"
+            onClick={() => setRailCollapsed(!railCollapsed)}
+            title="Collapse/expand navigation"
+            aria-label="Toggle navigation"
+          >
+            <Icon name="menu" size={16} />
+          </button>
+          <ul className="kos-taskmanager__rail-list">
+            {RAIL_ITEMS.map((item) => (
+              <li key={item.id}>
+                <RailButton
+                  item={item}
+                  active={page === item.id}
+                  onSelect={() => setPage(item.id)}
+                />
+              </li>
+            ))}
+          </ul>
+          <div className="kos-taskmanager__rail-footer">
+            <RailButton
+              item={SETTINGS_ITEM}
+              active={page === SETTINGS_ITEM.id}
+              onSelect={() => setPage(SETTINGS_ITEM.id)}
+            />
+          </div>
         </nav>
-      </header>
-      <div className="kos-taskmanager__content">{content}</div>
-    </div>
-  );
-}
-
-function ClusterNodesView({
-  clusterId,
-  onSelectNode,
-}: {
-  clusterId: string;
-  onSelectNode: (nodeName: string) => void;
-}) {
-  const state = useLoaded(`nodes:${clusterId}`, () => clusterClient.listNodes(clusterId));
-  return (
-    <div className="kos-taskmanager__section">
-      <AsyncList
-        state={state}
-        emptyText="No nodes"
-        toRow={(node: NodeInfo) => ({
-          key: node.name,
-          title: node.name,
-          meta: node.status,
-          onClick: () => onSelectNode(node.name),
-        })}
-      />
-    </div>
-  );
-}
-
-function ClusterNamespacesView({
-  clusterId,
-  onSelectNamespace,
-}: {
-  clusterId: string;
-  onSelectNamespace: (namespace: string) => void;
-}) {
-  const state = useLoaded(`namespaces:${clusterId}`, () => clusterClient.listNamespaces(clusterId));
-  return (
-    <div className="kos-taskmanager__section">
-      <AsyncList
-        state={state}
-        emptyText="No namespaces"
-        toRow={(namespace: NamespaceInfo) => ({
-          key: namespace.name,
-          title: namespace.name,
-          meta: namespace.status,
-          onClick: () => onSelectNamespace(namespace.name),
-        })}
-      />
+        <section className="kos-taskmanager__main">
+          {clusters.status === 'loading' ? (
+            <p className="kos-taskmanager__status">Loading…</p>
+          ) : clusters.status === 'error' ||
+            (clusters.status === 'ready' && clusters.data.length === 0) ? (
+            <p className="kos-taskmanager__status is-error">
+              No clusters configured — start the Go server
+            </p>
+          ) : (
+            <>
+              {/*
+                The pages own their group-by and search controls (ProcessesView renders
+                its own toolbar), so the shell deliberately omits `onGroupByChange` and
+                `onQueryChange`; the built-in namespace select is a non-functional stub,
+                hence the real namespace picker is passed in `children` instead.
+              */}
+              <TaskManagerCommandBar
+                page={page}
+                updateSpeed={updateSpeed}
+                onUpdateSpeedChange={setUpdateSpeed}
+                onRefresh={() => setRefreshNonce((value) => value + 1)}
+              >
+                <select
+                  className="kos-taskmanager__select"
+                  aria-label="Namespace"
+                  value={namespace === null ? 'all' : namespace}
+                  onChange={handleNamespaceChange}
+                >
+                  <option value="all">All namespaces</option>
+                  {namespaceOptions.map((item) => (
+                    <option key={item.name} value={item.name}>
+                      {item.name}
+                    </option>
+                  ))}
+                </select>
+                {hasMultipleClusters ? (
+                  <select
+                    className="kos-taskmanager__select"
+                    aria-label="Cluster"
+                    value={clusterId ?? ''}
+                    onChange={handleClusterChange}
+                  >
+                    {clusters.status === 'ready'
+                      ? clusters.data.map((cluster) => (
+                          <option key={cluster.id} value={cluster.id}>
+                            {cluster.name}
+                          </option>
+                        ))
+                      : null}
+                  </select>
+                ) : null}
+              </TaskManagerCommandBar>
+              {showHero ? (
+                <Hero
+                  clusterId={clusterId}
+                  clusterName={clusterName}
+                  namespace={namespace}
+                  updateSpeed={updateSpeed}
+                />
+              ) : null}
+              <div className="kos-taskmanager__content">{renderPage()}</div>
+            </>
+          )}
+        </section>
+      </div>
     </div>
   );
 }

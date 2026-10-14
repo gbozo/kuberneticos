@@ -1,0 +1,140 @@
+/* Page-level styles for the Task Manager 2.0 V1–V4 views (G1).
+   Colours derive from the --kos-* tokens (and the shell's --kos-tm-* constants). */
+
+.kos-tm-view {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+
+.kos-tm-view--workloads,
+.kos-tm-view--services,
+.kos-tm-view--inventory {
+  height: 100%;
+}
+
+.kos-tm-view--performance {
+  gap: 12px;
+}
+
+.kos-tm-toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.kos-tm-search {
+  flex: 1 1 auto;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 5px 12px;
+  border: 1px solid var(--kos-input-border);
+  border-radius: 999px;
+  background: var(--kos-input-bg);
+  color: var(--kos-window-fg);
+  font: inherit;
+  font-size: 12px;
+}
+
+.kos-tm-search:focus-visible,
+.kos-tm-select:focus-visible,
+.kos-tm-resource-list button:focus-visible {
+  outline: var(--kos-focus-outline);
+  outline-offset: -1px;
+}
+
+.kos-tm-select {
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  padding: 4px 8px;
+  border: 1px solid var(--kos-input-border);
+  border-radius: var(--kos-window-radius);
+  background: var(--kos-input-bg);
+  color: var(--kos-window-fg);
+  font: inherit;
+  font-size: 12px;
+}
+
+.kos-tm-resource-list {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.kos-tm-resource-list button {
+  padding: 5px 12px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--kos-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.kos-tm-resource-list button:hover {
+  background: var(--kos-hover);
+  color: var(--kos-window-fg);
+}
+
+.kos-tm-resource-list button.active {
+  border-color: var(--kos-border);
+  background: var(--kos-hover);
+  color: var(--kos-window-fg);
+  font-weight: 600;
+}
+
+.kos-tm-chart-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+
+.kos-tm-sparkline-grid {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.kos-tm-sparkline-grid .kos-tm-sparkline {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.kos-tm-current {
+  flex: 0 0 auto;
+  color: var(--kos-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.kos-tm-empty {
+  padding: 10px 12px;
+  border: 1px dashed var(--kos-border);
+  border-radius: var(--kos-window-radius);
+  color: var(--kos-muted);
+  font-size: 12px;
+}
+
+.kos-tm-empty-hint {
+  color: var(--kos-muted);
+  font-size: 12px;
+}
+
+.kos-tm-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 360px;
+  padding: 12px;
+  border: 1px solid var(--kos-border);
+  border-radius: var(--kos-window-radius);
+  background: var(--kos-window-bg);
+  color: var(--kos-window-fg);
+  font-size: 13px;
+}

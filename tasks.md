@@ -389,6 +389,13 @@ barrel. This is what lets G1 wire the whole app before the views exist.
 
 ### Phase 1 — Server metrics implementation (parallel with Phase 2+)
 
+> **STATUS: COMPLETE** (2026-10-15). S1 landed: `k8s.io/metrics v0.37.1` added
+> (direct); `GetNodeMetrics`/`GetPodMetrics` implemented on `liveClient` with the
+> availability fallback (`available:false`, HTTP 200, never 500) and best-effort
+> Summary API disk/network; `gofmt`/`go build`/`go vet` green. The live kind
+> smoke-test acceptance item was **not** run here — this environment has no
+> `kubectl`/`kind`.
+
 #### S1 · Implement metrics in the Go server — owner of `server/main.go` + tests
 * Add `k8s.io/metrics v0.37.1` (`go get`), build a
   `metricsv1beta1.NewForConfig` client inside `buildClient`/`liveClient`.
@@ -415,6 +422,12 @@ barrel. This is what lets G1 wire the whole app before the views exist.
 ---
 
 ### Phase 2 — Frontend primitives (parallel with Phase 1 & each other)
+
+> **STATUS: COMPLETE** (2026-10-15). C1, C2, D1, D2 landed; `tsc -b` and
+> `npm run build` green; D1 ships 29 vitest cases covering tree building,
+> roll-up, grouping, sort, filter and dedupe. Per §8/§11 the C2 acceptance unit
+> tests and the D2 fake-timer poll-cadence tests are deferred, and the
+> `DataTable` CSS is still a follow-up (see caveats in the commit message).
 
 #### C1 · Charts — `taskmanagerCharts.tsx` + `taskmanagerCharts.css`
 * `<Sparkline values height stroke />` — tiny SVG polyline for table cells and
@@ -462,6 +475,11 @@ barrel. This is what lets G1 wire the whole app before the views exist.
 
 ### Phase 3 — Views (parallel; all depend on Phase 0 + C1/C2/D1/D2 interfaces)
 
+> **STATUS: COMPLETE** (2026-10-15). V1–V4 compile and render their pages under
+> strict TS (`tsc -b`/`npm run build` green). **Follow-up (not done):** the
+> detail flyouts (workload children/logs flyout, service detail flyout, node
+> detail reuse) are not yet implemented.
+
 #### V1 · Workloads page — `taskmanagerProcesses.tsx` (+ `taskmanagerViews.css` section)
 * Hero (cluster identity + CPU/Mem/Disk gauges), DataTable tree from
   `buildWorkloadTree` + `groupBy`, live columns with aggregates in the header and
@@ -494,6 +512,13 @@ barrel. This is what lets G1 wire the whole app before the views exist.
 
 ### Phase 4 — Shell & integration
 
+> **STATUS: COMPLETE** (2026-10-15). G1 landed: collapsible rail (Settings pinned
+> bottom, ArrowUp/Down + Ctrl+Tab nav), page router over `TaskManagerPage`,
+> per-page command-bar host, hero host, cluster auto-select, and the offline
+> empty-state message. `tsc -b`/`npm run build`/prettier/eslint green. The
+> `usePolledMetrics` decision is documented in the file (each page polls its own
+> data; the shell polls only inside `<Hero>`).
+
 #### G1 · Rewrite the shell — `TaskManager.tsx` + `taskmanager.css`
 * Left rail (collapsible, keyboard nav, Settings pinned bottom), page router over
   `TaskManagerPage`, per-page command bar host, hero host, cluster auto-select
@@ -510,6 +535,10 @@ barrel. This is what lets G1 wire the whole app before the views exist.
 ---
 
 ### Phase 5 — Tests & docs
+
+> **STATUS: NOT STARTED.** With G1 landed, the existing `e2e/taskmanager.spec.ts`
+> (written for the old breadcrumb UI) now fails; T1 must rewrite it and extend
+> `mockClusterApi` with `/api/metrics/nodes` and `/api/metrics/pods`.
 
 #### T1 · e2e — `e2e/taskmanager.spec.ts`
 * Extend `mockClusterApi` to also stub `/api/metrics/nodes` and

@@ -1,0 +1,75 @@
+/* Task Manager command bar styles */
+.kos-tm-command-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--kos-border);
+  background: var(--kos-window-bg);
+  font-size: 12px;
+}
+
+.kos-tm-command-bar__left,
+.kos-tm-command-bar__right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.kos-tm-command-bar__button {
+  background: var(--kos-button-bg);
+  color: var(--kos-text-primary);
+  border: 1px solid var(--kos-border);
+  border-radius: var(--kos-control-radius);
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.kos-tm-command-bar__button:hover {
+  background: var(--kos-hover);
+}
+
+.kos-tm-command-bar__group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.kos-tm-command-bar__label {
+  color: var(--kos-text-secondary);
+  font-size: 11px;
+}
+
+.kos-tm-command-bar__select {
+  background: var(--kos-input-bg);
+  color: var(--kos-text-primary);
+  border: 1px solid var(--kos-border);
+  border-radius: var(--kos-control-radius);
+  padding: 3px 6px;
+  font-size: 12px;
+}
+
+.kos-tm-command-bar__input {
+  background: var(--kos-input-bg);
+  color: var(--kos-text-primary);
+  border: 1px solid var(--kos-border);
+  border-radius: calc(var(--kos-control-radius) * 2);
+  padding: 4px 10px;
+  font-size: 12px;
+  width: 160px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}

@@ -23,11 +23,13 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	metricsv1beta1 "k8s.io/metrics/pkg/client/clientset/versioned"
 )
 
 const (
@@ -273,6 +275,7 @@ func (offlineClient) GetPodMetrics(context.Context, string, string) (PodMetricsR
 // liveClient talks to a real cluster through a client-go clientset.
 type liveClient struct {
 	clientset   kubernetes.Interface
+	metrics     metricsv1beta1.Interface
 	clusterID   string
 	clusterName string
 	server      string
@@ -523,17 +526,213 @@ func (c *liveClient) PodLogs(ctx context.Context, _, namespace, pod, container s
 	return string(data), nil
 }
 
-// GetNodeMetrics is a Phase 0 stub. The real metrics-server integration
-// (k8s.io/metrics + kubelet Summary API) lands in Phase 1 task S1; until then
-// this reports metrics as unavailable with a non-nil empty slice so the API
-// never returns "null".
-func (c *liveClient) GetNodeMetrics(context.Context, string) (NodeMetricsResult, error) {
-	return NodeMetricsResult{Available: false, Nodes: []NodeMetrics{}}, nil
+// metricsUnavailable reports whether err means the metrics API is not installed
+// or not reachable, in which case the endpoint should report available:false
+// with HTTP 200 rather than an error.
+func metricsUnavailable(err error) bool {
+	return apierrors.IsNotFound(err) ||
+		apierrors.IsServiceUnavailable(err) ||
+		apierrors.IsMethodNotSupported(err) ||
+		meta.IsNoMatchError(err)
 }
 
-// GetPodMetrics is a Phase 0 stub; see GetNodeMetrics for the Phase 1 plan.
-func (c *liveClient) GetPodMetrics(context.Context, string, string) (PodMetricsResult, error) {
-	return PodMetricsResult{Available: false, Pods: []PodMetrics{}}, nil
+type summaryFS struct {
+	UsedBytes     int64 `json:"usedBytes"`
+	CapacityBytes int64 `json:"capacityBytes"`
+}
+
+type summaryNetwork struct {
+	RxBytes int64 `json:"rxBytes"`
+	TxBytes int64 `json:"txBytes"`
+}
+
+type summaryNode struct {
+	FS      summaryFS      `json:"fs"`
+	Network summaryNetwork `json:"network"`
+}
+
+type summaryPodRef struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+}
+
+type summaryPod struct {
+	PodRef           summaryPodRef `json:"podRef"`
+	EphemeralStorage struct {
+		UsedBytes int64 `json:"usedBytes"`
+	} `json:"ephemeral-storage"`
+	Network summaryNetwork `json:"network"`
+}
+
+type summaryResponse struct {
+	Node summaryNode  `json:"node"`
+	Pods []summaryPod `json:"pods"`
+}
+
+// nodeSummary fetches the kubelet Summary API document for a node via the
+// nodes/proxy subresource. Callers treat any error as "no data".
+func (c *liveClient) nodeSummary(ctx context.Context, name string) (summaryResponse, error) {
+	raw, err := c.clientset.CoreV1().RESTClient().Get().
+		Resource("nodes").Name(name).
+		SubResource("proxy").Suffix("stats/summary").
+		DoRaw(ctx)
+	if err != nil {
+		return summaryResponse{}, err
+	}
+	var summary summaryResponse
+	if err := json.Unmarshal(raw, &summary); err != nil {
+		return summaryResponse{}, err
+	}
+	return summary, nil
+}
+
+// podSummaries collects the kubelet Summary API pod entries for every node the
+// given pods are scheduled on, keyed by "namespace/name". It is best effort:
+// any node whose summary cannot be fetched is skipped.
+func (c *liveClient) podSummaries(ctx context.Context, nodeByPod map[string]string) map[string]summaryPod {
+	nodes := map[string]struct{}{}
+	for _, node := range nodeByPod {
+		nodes[node] = struct{}{}
+	}
+	out := map[string]summaryPod{}
+	for node := range nodes {
+		summary, err := c.nodeSummary(ctx, node)
+		if err != nil {
+			continue
+		}
+		for _, pod := range summary.Pods {
+			out[pod.PodRef.Namespace+"/"+pod.PodRef.Name] = pod
+		}
+	}
+	return out
+}
+
+// GetNodeMetrics reports live node resource usage from metrics-server, joined
+// with allocatable capacity and pod counts from the core API and disk/network
+// figures from the kubelet Summary API. When metrics-server is not installed it
+// reports available:false with a non-nil empty slice rather than an error.
+func (c *liveClient) GetNodeMetrics(ctx context.Context, _ string) (NodeMetricsResult, error) {
+	if c.metrics == nil {
+		return NodeMetricsResult{Available: false, Nodes: []NodeMetrics{}}, nil
+	}
+
+	list, err := c.metrics.MetricsV1beta1().NodeMetricses().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		if metricsUnavailable(err) {
+			return NodeMetricsResult{Available: false, Nodes: []NodeMetrics{}}, nil
+		}
+		return NodeMetricsResult{}, err
+	}
+
+	allocatable := map[string]corev1.ResourceList{}
+	if nodes, err := c.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{}); err == nil {
+		for _, node := range nodes.Items {
+			allocatable[node.Name] = node.Status.Allocatable
+		}
+	}
+
+	podCounts := map[string]int32{}
+	if pods, err := c.clientset.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{}); err == nil {
+		for _, pod := range pods.Items {
+			if pod.Spec.NodeName != "" {
+				podCounts[pod.Spec.NodeName]++
+			}
+		}
+	}
+
+	out := make([]NodeMetrics, 0, len(list.Items))
+	for _, item := range list.Items {
+		nm := NodeMetrics{Name: item.Name}
+		if qty, ok := item.Usage[corev1.ResourceCPU]; ok {
+			nm.CPUMillis = qty.MilliValue()
+		}
+		if qty, ok := item.Usage[corev1.ResourceMemory]; ok {
+			nm.MemoryBytes = qty.Value()
+		}
+		if res, ok := allocatable[item.Name]; ok {
+			if qty, ok := res[corev1.ResourceCPU]; ok {
+				nm.CPUAllocatableMillis = qty.MilliValue()
+			}
+			if qty, ok := res[corev1.ResourceMemory]; ok {
+				nm.MemoryAllocatableBytes = qty.Value()
+			}
+		}
+		nm.PodCount = podCounts[item.Name]
+		if summary, err := c.nodeSummary(ctx, item.Name); err == nil {
+			nm.DiskUsedBytes = summary.Node.FS.UsedBytes
+			nm.DiskCapacityBytes = summary.Node.FS.CapacityBytes
+			nm.NetworkRxBytes = summary.Node.Network.RxBytes
+			nm.NetworkTxBytes = summary.Node.Network.TxBytes
+		}
+		out = append(out, nm)
+	}
+
+	return NodeMetricsResult{Available: true, Nodes: out}, nil
+}
+
+// GetPodMetrics reports live pod resource usage from metrics-server, joined with
+// scheduling nodes from the core API and disk/network figures from the kubelet
+// Summary API. When metrics-server is not installed it reports available:false
+// with a non-nil empty slice rather than an error.
+func (c *liveClient) GetPodMetrics(ctx context.Context, _ string, namespace string) (PodMetricsResult, error) {
+	if c.metrics == nil {
+		return PodMetricsResult{Available: false, Pods: []PodMetrics{}}, nil
+	}
+
+	ns := metav1.NamespaceAll
+	if namespace != "" {
+		ns = namespace
+	}
+
+	list, err := c.metrics.MetricsV1beta1().PodMetricses(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		if metricsUnavailable(err) {
+			return PodMetricsResult{Available: false, Pods: []PodMetrics{}}, nil
+		}
+		return PodMetricsResult{}, err
+	}
+
+	nodeByPod := map[string]string{}
+	if pods, err := c.clientset.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{}); err == nil {
+		for _, pod := range pods.Items {
+			if pod.Spec.NodeName != "" {
+				nodeByPod[pod.Namespace+"/"+pod.Name] = pod.Spec.NodeName
+			}
+		}
+	}
+
+	summaryPods := c.podSummaries(ctx, nodeByPod)
+
+	out := make([]PodMetrics, 0, len(list.Items))
+	for _, item := range list.Items {
+		key := item.Namespace + "/" + item.Name
+		pm := PodMetrics{
+			Name:       item.Name,
+			Namespace:  item.Namespace,
+			Node:       nodeByPod[key],
+			Containers: make([]ContainerMetrics, 0, len(item.Containers)),
+		}
+		for _, container := range item.Containers {
+			entry := ContainerMetrics{Name: container.Name}
+			if qty, ok := container.Usage[corev1.ResourceCPU]; ok {
+				entry.CPUMillis = qty.MilliValue()
+				pm.CPUMillis += entry.CPUMillis
+			}
+			if qty, ok := container.Usage[corev1.ResourceMemory]; ok {
+				entry.MemoryBytes = qty.Value()
+				pm.MemoryBytes += entry.MemoryBytes
+			}
+			pm.Containers = append(pm.Containers, entry)
+		}
+		if summary, ok := summaryPods[key]; ok {
+			pm.DiskUsedBytes = summary.EphemeralStorage.UsedBytes
+			pm.NetworkRxBytes = summary.Network.RxBytes
+			pm.NetworkTxBytes = summary.Network.TxBytes
+		}
+		out = append(out, pm)
+	}
+
+	return PodMetricsResult{Available: true, Pods: out}, nil
 }
 
 // replicasFrom builds a Replicas view from a desired pointer plus status counts.
@@ -966,8 +1165,16 @@ func buildClient() (ClusterClient, string) {
 		return offlineClient{}, offlineSource
 	}
 
+	// A nil metrics client means "metrics-server not installed"; the metrics
+	// endpoints then report available:false while everything else stays live.
+	var metricsClient metricsv1beta1.Interface
+	if mc, metricsErr := metricsv1beta1.NewForConfig(setup.cfg); metricsErr == nil {
+		metricsClient = mc
+	}
+
 	return &liveClient{
 		clientset:   clientset,
+		metrics:     metricsClient,
 		clusterID:   setup.name,
 		clusterName: setup.name,
 		server:      setup.cfg.Host,

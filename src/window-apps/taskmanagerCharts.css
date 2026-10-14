@@ -1,0 +1,278 @@
+/* Chart primitives for Task Manager 2.0 (tasks.md §6 C1).
+   All colours derive from the --kos-* tokens via color-mix so every theme works. */
+
+/* ── Sparkline ─────────────────────────────────────────────────────────── */
+
+.kos-tm-sparkline {
+  display: block;
+  width: 100%;
+  overflow: visible;
+  color: var(--kos-accent);
+}
+
+.kos-tm-sparkline__line {
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.kos-tm-sparkline__area {
+  fill: currentColor;
+  opacity: 0.15;
+}
+
+.kos-tm-sparkline__dot {
+  fill: currentColor;
+  vector-effect: non-scaling-stroke;
+}
+
+.kos-tm-sparkline__placeholder {
+  stroke: currentColor;
+  stroke-width: 1;
+  stroke-dasharray: 2 2;
+  opacity: 0.4;
+  vector-effect: non-scaling-stroke;
+}
+
+/* ── Performance chart ─────────────────────────────────────────────────── */
+
+.kos-tm-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.kos-tm-chart__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  color: var(--kos-muted);
+  font-size: 12px;
+  list-style: none;
+}
+
+.kos-tm-chart__legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.kos-tm-chart__legend-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--kos-accent);
+}
+
+.kos-tm-chart__plot {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+
+.kos-tm-chart__svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.kos-tm-chart__grid {
+  stroke: var(--kos-border);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.kos-tm-chart__axis-label,
+.kos-tm-chart__axis-unit {
+  fill: var(--kos-muted);
+  font-family: var(--kos-font-family);
+  font-size: 10px;
+}
+
+.kos-tm-chart__axis-unit {
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+}
+
+.kos-tm-chart__line {
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.kos-tm-chart__area {
+  stroke: none;
+}
+
+.kos-tm-chart__crosshair {
+  stroke: var(--kos-muted);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.kos-tm-chart__marker {
+  fill: currentColor;
+  stroke: var(--kos-window-bg);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.kos-tm-chart__overlay {
+  cursor: crosshair;
+}
+
+.kos-tm-chart__empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 80px;
+  color: var(--kos-muted);
+  font-size: 12px;
+}
+
+.kos-tm-chart__tooltip {
+  position: absolute;
+  top: 8px;
+  z-index: 2;
+  padding: 6px 8px;
+  border: 1px solid var(--kos-border);
+  border-radius: var(--kos-window-radius);
+  background: var(--kos-tooltip-bg);
+  color: var(--kos-tooltip-fg);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+  transform: translateX(-50%);
+  box-shadow: var(--kos-window-shadow);
+}
+
+.kos-tm-chart__tooltip-time {
+  margin-bottom: 4px;
+  color: var(--kos-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.kos-tm-chart__tooltip-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.kos-tm-chart__tooltip-swatch {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--kos-accent);
+}
+
+.kos-tm-chart__tooltip-label {
+  color: var(--kos-muted);
+}
+
+.kos-tm-chart__tooltip-value {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Composition bar ───────────────────────────────────────────────────── */
+
+.kos-tm-composition-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.kos-tm-composition-bar__label {
+  flex: 0 0 auto;
+  color: var(--kos-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.kos-tm-composition-bar__track {
+  position: relative;
+  flex: 1 1 auto;
+  height: 8px;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--kos-window-fg) 12%, transparent);
+}
+
+.kos-tm-composition-bar__fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--kos-accent) 85%, var(--kos-window-bg));
+  transition: width 0.3s ease;
+}
+
+.kos-tm-composition-bar__value {
+  flex: 0 0 auto;
+  min-width: 4ch;
+  color: var(--kos-window-fg);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* ── Gauge ─────────────────────────────────────────────────────────────── */
+
+.kos-tm-gauge {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: 84px;
+  max-width: 100%;
+  color: var(--kos-window-fg);
+}
+
+.kos-tm-gauge__svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.kos-tm-gauge__track {
+  stroke: color-mix(in srgb, var(--kos-window-fg) 14%, transparent);
+}
+
+.kos-tm-gauge__value {
+  stroke: var(--kos-accent);
+  transition: stroke-dasharray 0.3s ease;
+}
+
+.kos-tm-gauge__readout {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 1.1;
+  transform: translate(-50%, -52%);
+  pointer-events: none;
+}
+
+.kos-tm-gauge__number {
+  font-size: 16px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.kos-tm-gauge__label {
+  color: var(--kos-muted);
+  font-size: 11px;
+}

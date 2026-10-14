@@ -14,7 +14,7 @@ export type GroupBy = 'deployment' | 'replicaset' | 'pod' | 'namespace' | 'node'
 /** `null` means "all namespaces". */
 export type NamespaceFilter = string | null;
 
-export type WorkloadKind = 'deployment' | 'replicaset' | 'pod';
+export type WorkloadKind = 'deployment' | 'replicaset' | 'pod' | 'group';
 
 export type StatusTone = 'ok' | 'warn' | 'danger' | 'muted';
 
@@ -23,6 +23,7 @@ export interface WorkloadNode {
   readonly kind: WorkloadKind;
   readonly name: string;
   readonly namespace?: string;
+  readonly node?: string;
   readonly status?: string;
   readonly statusTone?: StatusTone;
   readonly depth: number;

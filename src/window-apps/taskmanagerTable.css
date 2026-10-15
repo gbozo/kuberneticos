@@ -19,10 +19,10 @@
 }
 
 .kos-tm-command-bar__button {
-  background: var(--kos-button-bg);
-  color: var(--kos-text-primary);
+  background: var(--kos-input-bg);
+  color: var(--kos-window-fg);
   border: 1px solid var(--kos-border);
-  border-radius: var(--kos-control-radius);
+  border-radius: var(--kos-window-radius);
   padding: 4px 10px;
   font-size: 12px;
   cursor: pointer;
@@ -39,24 +39,24 @@
 }
 
 .kos-tm-command-bar__label {
-  color: var(--kos-text-secondary);
+  color: var(--kos-muted);
   font-size: 11px;
 }
 
 .kos-tm-command-bar__select {
   background: var(--kos-input-bg);
-  color: var(--kos-text-primary);
+  color: var(--kos-window-fg);
   border: 1px solid var(--kos-border);
-  border-radius: var(--kos-control-radius);
+  border-radius: var(--kos-window-radius);
   padding: 3px 6px;
   font-size: 12px;
 }
 
 .kos-tm-command-bar__input {
   background: var(--kos-input-bg);
-  color: var(--kos-text-primary);
+  color: var(--kos-window-fg);
   border: 1px solid var(--kos-border);
-  border-radius: calc(var(--kos-control-radius) * 2);
+  border-radius: calc(var(--kos-window-radius) * 2);
   padding: 4px 10px;
   font-size: 12px;
   width: 160px;
@@ -74,7 +74,177 @@
   border-width: 0;
 }
 
+/* ── Data table (role=grid) — Win11/Fluent-ish ──────────────────────────── */
+
+.kos-tm-table {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.kos-tm-table__scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+table.kos-tm-table__table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+thead.kos-tm-table__thead,
+tr.kos-tm-table__header-row {
+  background: var(--kos-window-bg);
+}
+
+th.kos-tm-table__th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--kos-border);
+  background: var(--kos-window-bg);
+  color: var(--kos-muted);
+  font-size: 11px;
+  font-weight: 600;
+  user-select: none;
+}
+
+th.kos-tm-table__th[data-sortable='true'] {
+  cursor: pointer;
+}
+
+th.kos-tm-table__th[data-sortable='true']:hover {
+  background: var(--kos-hover);
+}
+
+th.kos-tm-table__th:focus-visible {
+  outline: var(--kos-focus-outline);
+  outline-offset: -2px;
+}
+
+.kos-tm-table__th-content {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.kos-tm-table__th-title {
+  overflow: hidden;
+  color: color-mix(in srgb, var(--kos-window-fg) 80%, transparent);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kos-tm-table__th-aggregate {
+  color: var(--kos-window-fg);
+  font-weight: 600;
+}
+
+.kos-tm-table__th-sort {
+  font-size: 9px;
+  opacity: 0.35;
+}
+
+.kos-tm-table__th-sort[data-dir] {
+  opacity: 1;
+}
+
+tr.kos-tm-table__row {
+  transition: background-color 0.1s ease;
+}
+
+tr.kos-tm-table__row:not(
+    .kos-tm-table__row--loading,
+    .kos-tm-table__row--error,
+    .kos-tm-table__row--empty,
+    .is-active,
+    [data-active='true']
+  ):hover {
+  background: var(--kos-hover);
+}
+
 /* Row opened in a detail flyout (double-click / Enter) — accent-tinted, Win11-style. */
-.kos-tm-table__row.is-active {
+tr.kos-tm-table__row.is-active,
+tr.kos-tm-table__row[data-active='true'] {
   background: color-mix(in srgb, var(--kos-accent) 12%, transparent);
+}
+
+tr.kos-tm-table__row:focus-visible {
+  outline: var(--kos-focus-outline);
+  outline-offset: -2px;
+}
+
+td.kos-tm-table__cell {
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--kos-border);
+  vertical-align: middle;
+}
+
+.kos-tm-table__cell-content {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.kos-tm-table__cell-value {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+td.kos-tm-table__cell--heat[data-heat-value] {
+  background: color-mix(
+    in srgb,
+    var(--kos-accent) calc(var(--kos-tm-heat-opacity, 0) * 100%),
+    transparent
+  );
+}
+
+button.kos-tm-table__tree-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--kos-window-fg);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+button.kos-tm-table__tree-toggle:hover {
+  background: var(--kos-hover);
+}
+
+button.kos-tm-table__tree-toggle:focus-visible {
+  outline: var(--kos-focus-outline);
+  outline-offset: -1px;
+}
+
+.kos-tm-table__tree-indent {
+  flex: none;
+  align-self: center;
+  height: 1em;
+}
+
+tr.kos-tm-table__row--loading .kos-tm-table__cell--state,
+tr.kos-tm-table__row--error .kos-tm-table__cell--state,
+tr.kos-tm-table__row--empty .kos-tm-table__cell--state {
+  padding: 16px;
+  color: var(--kos-muted);
+  text-align: center;
+}
+
+tr.kos-tm-table__row--error td.kos-tm-table__cell--error {
+  color: var(--kos-tm-danger, #d13438);
 }

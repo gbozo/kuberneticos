@@ -387,6 +387,119 @@ func TestHandlePodLogsInvalidTailLines(t *testing.T) {
 	assertStatus(t, rec, http.StatusBadRequest)
 }
 
+func TestHandleMetricsNodes(t *testing.T) {
+	stub := &stubClient{nodeMetrics: NodeMetricsResult{Available: true, Nodes: []NodeMetrics{{
+		Name:                   "n1",
+		CPUMillis:              740,
+		MemoryBytes:            1073741824,
+		CPUAllocatableMillis:   4000,
+		MemoryAllocatableBytes: 8589934592,
+		DiskUsedBytes:          21474836480,
+		DiskCapacityBytes:      107374182400,
+		NetworkRxBytes:         1024,
+		NetworkTxBytes:         2048,
+		PodCount:               10,
+	}}}}
+	rec := serve(t, stub, http.MethodGet, "/api/metrics/nodes?cluster=c1")
+
+	assertStatus(t, rec, http.StatusOK)
+	assertJSONContentType(t, rec)
+
+	got := decodeBody[nodeMetricsResponse](t, rec)
+	if got.Source != liveSource {
+		t.Errorf("source = %q, want %q", got.Source, liveSource)
+	}
+	if !got.Available {
+		t.Errorf("available = false, want true")
+	}
+	if len(got.Nodes) != 1 {
+		t.Fatalf("nodes = %+v", got.Nodes)
+	}
+	n := got.Nodes[0]
+	if n.Name != "n1" || n.CPUMillis != 740 || n.MemoryBytes != 1073741824 || n.PodCount != 10 {
+		t.Errorf("node = %+v", n)
+	}
+	if stub.gotCluster != "c1" {
+		t.Errorf("cluster forwarded = %q, want c1", stub.gotCluster)
+	}
+}
+
+func TestHandleMetricsPodsForwardsNamespace(t *testing.T) {
+	stub := &stubClient{podMetrics: PodMetricsResult{Available: true, Pods: []PodMetrics{{
+		Name:        "p1",
+		Namespace:   "default",
+		Node:        "n1",
+		CPUMillis:   50,
+		MemoryBytes: 52428800,
+		Containers:  []ContainerMetrics{{Name: "web", CPUMillis: 50, MemoryBytes: 52428800}},
+	}}}}
+	rec := serve(t, stub, http.MethodGet, "/api/metrics/pods?cluster=c1&namespace=default")
+
+	assertStatus(t, rec, http.StatusOK)
+	assertJSONContentType(t, rec)
+
+	got := decodeBody[podMetricsResponse](t, rec)
+	if got.Source != liveSource {
+		t.Errorf("source = %q, want %q", got.Source, liveSource)
+	}
+	if !got.Available {
+		t.Errorf("available = false, want true")
+	}
+	if len(got.Pods) != 1 {
+		t.Fatalf("pods = %+v", got.Pods)
+	}
+	p := got.Pods[0]
+	if p.Name != "p1" || p.Namespace != "default" || len(p.Containers) != 1 {
+		t.Errorf("pod = %+v", p)
+	}
+	if stub.gotCluster != "c1" {
+		t.Errorf("cluster forwarded = %q, want c1", stub.gotCluster)
+	}
+	if stub.gotNamespace != "default" {
+		t.Errorf("namespace forwarded = %q, want default", stub.gotNamespace)
+	}
+}
+
+func TestHandleMetricsUnavailableStillOK(t *testing.T) {
+	t.Run("nodes", func(t *testing.T) {
+		stub := &stubClient{nodeMetrics: NodeMetricsResult{Available: false}}
+		rec := serve(t, stub, http.MethodGet, "/api/metrics/nodes?cluster=c1")
+
+		assertStatus(t, rec, http.StatusOK)
+		assertJSONContentType(t, rec)
+
+		got := decodeBody[nodeMetricsResponse](t, rec)
+		if got.Available {
+			t.Errorf("available = true, want false")
+		}
+		if got.Nodes == nil || len(got.Nodes) != 0 {
+			t.Errorf("nodes = %+v, want non-nil empty slice", got.Nodes)
+		}
+		if !strings.Contains(rec.Body.String(), `"nodes":[]`) {
+			t.Errorf("body = %s, want \"nodes\":[]", rec.Body.String())
+		}
+	})
+
+	t.Run("pods", func(t *testing.T) {
+		stub := &stubClient{podMetrics: PodMetricsResult{Available: false}}
+		rec := serve(t, stub, http.MethodGet, "/api/metrics/pods?cluster=c1&namespace=default")
+
+		assertStatus(t, rec, http.StatusOK)
+		assertJSONContentType(t, rec)
+
+		got := decodeBody[podMetricsResponse](t, rec)
+		if got.Available {
+			t.Errorf("available = true, want false")
+		}
+		if got.Pods == nil || len(got.Pods) != 0 {
+			t.Errorf("pods = %+v, want non-nil empty slice", got.Pods)
+		}
+		if !strings.Contains(rec.Body.String(), `"pods":[]`) {
+			t.Errorf("body = %s, want \"pods\":[]", rec.Body.String())
+		}
+	})
+}
+
 func TestMethodNotAllowed(t *testing.T) {
 	rec := serve(t, &stubClient{}, http.MethodPost, "/api/nodes")
 	if rec.Code == http.StatusOK {
@@ -412,6 +525,8 @@ func TestOfflineResponsesUseEmptyArrays(t *testing.T) {
 		{"/api/replicasets?namespace=default", "replicasets"},
 		{"/api/replicationcontrollers?namespace=default", "replicationcontrollers"},
 		{"/api/services?namespace=default", "services"},
+		{"/api/metrics/nodes", "nodes"},
+		{"/api/metrics/pods", "pods"},
 	}
 
 	for _, tc := range cases {

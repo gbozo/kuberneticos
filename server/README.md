@@ -1,10 +1,12 @@
 # KuberneticOS API server
 
 A small, stdlib-only Go HTTP server that exposes a JSON API for the
-KuberneticOS web desktop (clusters, nodes, pods, namespaces, workloads and
-services). It replaces the deleted
+KuberneticOS web desktop (clusters, nodes, pods, namespaces, workloads,
+services and live metrics). It replaces the deleted
 vendored `kubernetes-client/go` library with the modern, maintained
-[`k8s.io/client-go`](https://github.com/kubernetes/client-go).
+[`k8s.io/client-go`](https://github.com/kubernetes/client-go) and uses
+[`k8s.io/metrics`](https://github.com/kubernetes/metrics) for the
+`metrics.k8s.io/v1beta1` data behind `/api/metrics/*`.
 
 Cluster access follows the standard client-go loading order:
 
@@ -48,6 +50,8 @@ All responses are JSON and CORS-enabled (`Access-Control-Allow-Origin: *`).
 | `GET` | `/api/replicasets?cluster=<id>&namespace=<ns>` | `{"source":...,"replicasets":[ReplicaSet...]}` |
 | `GET` | `/api/replicationcontrollers?cluster=<id>&namespace=<ns>` | `{"source":...,"replicationcontrollers":[ReplicationController...]}` |
 | `GET` | `/api/services?cluster=<id>&namespace=<ns>` | `{"source":...,"services":[Service...]}` |
+| `GET` | `/api/metrics/nodes?cluster=<id>` | `{"source":...,"available":<bool>,"nodes":[NodeMetrics...]}` |
+| `GET` | `/api/metrics/pods?cluster=<id>&namespace=<ns>` | `{"source":...,"available":<bool>,"pods":[PodMetrics...]}` |
 
 Every response includes a `source` field (`"live"` or `"offline"`). All query
 parameters are optional unless noted; empty lists render as `[]`, never `null`.
@@ -55,7 +59,7 @@ parameters are optional unless noted; empty lists render as `[]`, never `null`.
 | Parameter | Used by | Meaning |
 |---|---|---|
 | `cluster` | all list/detail endpoints | Cluster identifier (echoed by the single configured client) |
-| `namespace` | pods, deployments, replicasets, replicationcontrollers, services, pods/logs | Namespace filter; all namespaces when omitted (list endpoints scope the API call) |
+| `namespace` | pods, deployments, replicasets, replicationcontrollers, services, pods/logs, metrics/pods | Namespace filter; all namespaces when omitted (list endpoints scope the API call) |
 | `node` | pods | Node name, forwarded as the `spec.nodeName` field selector |
 | `selector` | pods | Kubernetes label selector string (e.g. `app=web,tier=frontend`), forwarded as `ListOptions.LabelSelector` |
 | `name` | nodes/detail | **Required** node name; missing → `400` |
@@ -68,6 +72,17 @@ Errors are returned as `{"error":"..."}`. Missing/invalid parameters return
 `500`. Unknown methods on a known path return `405`; `OPTIONS` is answered by the
 CORS middleware with `204`.
 
+The two metrics endpoints are the exception to the error mapping: they read
+CPU/memory from `metrics.k8s.io/v1beta1` (via the
+[`k8s.io/metrics`](https://github.com/kubernetes/metrics) v0.37.1 client) and
+join node/pod disk and network figures best-effort from the kubelet **Summary
+API** (`nodes/<name>/proxy/stats/summary` through the `nodes/proxy`
+subresource, so the service account needs `nodes/proxy`). When metrics-server is
+not installed or the metrics API is unreachable they return
+`{"source":...,"available":false,"nodes":[]}` /
+`{"source":...,"available":false,"pods":[]}` with **HTTP 200** — never a 500.
+Offline mode also reports `available:false`.
+
 ### Types
 
 ```jsonc
@@ -77,8 +92,10 @@ CORS middleware with `204`.
 // Node
 { "name": "...", "status": "Ready", "roles": ["control-plane"], "version": "v1.30.0" }
 
-// Pod
-{ "name": "...", "namespace": "...", "node": "...", "phase": "Running" }
+// Pod (ownerKind/ownerName come from the controller ownerReferences and are
+// omitted when the pod has no controller owner; labels is omitted when empty)
+{ "name": "...", "namespace": "...", "node": "...", "phase": "Running",
+  "ownerKind": "ReplicaSet", "ownerName": "web-abc", "labels": { "app": "web" } }
 
 // Replicas
 { "desired": 3, "ready": 3, "available": 3, "updated": 3 }
@@ -89,8 +106,9 @@ CORS middleware with `204`.
 // Deployment
 { "name": "web", "namespace": "default", "replicas": { ...Replicas }, "images": ["nginx:1.27"] }
 
-// ReplicaSet (same minus images)
-{ "name": "web-abc", "namespace": "default", "replicas": { ...Replicas } }
+// ReplicaSet (same minus images; ownerKind/ownerName omitted when unowned)
+{ "name": "web-abc", "namespace": "default", "replicas": { ...Replicas },
+  "ownerKind": "Deployment", "ownerName": "web" }
 
 // ReplicationController (same minus images)
 { "name": "legacy", "namespace": "default", "replicas": { ...Replicas } }
@@ -98,8 +116,9 @@ CORS middleware with `204`.
 // ServicePort
 { "name": "http", "port": 80, "protocol": "TCP", "targetPort": "8080" }
 
-// Service
-{ "name": "web", "namespace": "default", "type": "ClusterIP", "clusterIP": "10.0.0.10", "ports": [ ...ServicePort ] }
+// Service (selector is omitted when the service has none)
+{ "name": "web", "namespace": "default", "type": "ClusterIP", "clusterIP": "10.0.0.10",
+  "ports": [ ...ServicePort ], "selector": { "app": "web" } }
 
 // NodeCondition / NodeAddress
 { "type": "Ready", "status": "True" }
@@ -116,11 +135,51 @@ CORS middleware with `204`.
   "conditions": [ { "type": "Ready", "status": "True" } ],
   "addresses": [ { "type": "InternalIP", "address": "10.0.0.1" } ]
 }
+
+// ContainerMetrics
+{ "name": "web", "cpuMillis": 12, "memoryBytes": 67108864 }
+
+// NodeMetrics — cpuAllocatableMillis, memoryAllocatableBytes, diskUsedBytes,
+// diskCapacityBytes, networkRxBytes, networkTxBytes and podCount are omitted
+// when unknown (e.g. no Summary API access)
+{
+  "name": "n1",
+  "cpuMillis": 250,
+  "memoryBytes": 1073741824,
+  "cpuAllocatableMillis": 4000,
+  "memoryAllocatableBytes": 8589934592,
+  "diskUsedBytes": 12884901888,
+  "diskCapacityBytes": 53687091200,
+  "networkRxBytes": 1048576,
+  "networkTxBytes": 2097152,
+  "podCount": 12
+}
+
+// PodMetrics — node, diskUsedBytes, networkRxBytes and networkTxBytes are
+// omitted when unknown
+{
+  "name": "web-0",
+  "namespace": "default",
+  "node": "n1",
+  "cpuMillis": 12,
+  "memoryBytes": 67108864,
+  "containers": [ { "name": "web", "cpuMillis": 12, "memoryBytes": 67108864 } ],
+  "diskUsedBytes": 20971520,
+  "networkRxBytes": 4096,
+  "networkTxBytes": 8192
+}
+
+// NodeMetricsResult / PodMetricsResult — the metrics endpoints' payload
+// (minus the `source` field the handlers add)
+{ "available": true, "nodes": [ ...NodeMetrics ] }
+{ "available": false, "pods": [] }
 ```
 
 > Note: `ReplicaSet` and `ReplicationController` have no "updated replicas"
 > status field, so their `replicas.updated` is always `0`. `Deployment` reports
-> `status.updatedReplicas`.
+> `status.updatedReplicas`. A service's backing pods are resolved client-side by
+> matching its `selector` against pod `labels` (there is no server endpoint for
+> this).
 
 ### Sample responses
 

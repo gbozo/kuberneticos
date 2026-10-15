@@ -64,12 +64,13 @@ type Node struct {
 
 // Pod is the API-facing view of a Kubernetes pod.
 type Pod struct {
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
-	Node      string `json:"node"`
-	Phase     string `json:"phase"`
-	OwnerKind string `json:"ownerKind,omitempty"`
-	OwnerName string `json:"ownerName,omitempty"`
+	Name      string            `json:"name"`
+	Namespace string            `json:"namespace"`
+	Node      string            `json:"node"`
+	Phase     string            `json:"phase"`
+	OwnerKind string            `json:"ownerKind,omitempty"`
+	OwnerName string            `json:"ownerName,omitempty"`
+	Labels    map[string]string `json:"labels,omitempty"`
 }
 
 // Replicas is the API-facing view of a workload's replica counts.
@@ -120,11 +121,12 @@ type ServicePort struct {
 
 // Service is the API-facing view of a Kubernetes service.
 type Service struct {
-	Name      string        `json:"name"`
-	Namespace string        `json:"namespace"`
-	Type      string        `json:"type"`
-	ClusterIP string        `json:"clusterIP"`
-	Ports     []ServicePort `json:"ports"`
+	Name      string            `json:"name"`
+	Namespace string            `json:"namespace"`
+	Type      string            `json:"type"`
+	ClusterIP string            `json:"clusterIP"`
+	Ports     []ServicePort     `json:"ports"`
+	Selector  map[string]string `json:"selector,omitempty"`
 }
 
 // NodeCondition is the API-facing view of a node condition.
@@ -338,6 +340,7 @@ func (c *liveClient) ListPods(ctx context.Context, _, node, namespace, selector 
 			Phase:     string(p.Status.Phase),
 			OwnerKind: ownerKind,
 			OwnerName: ownerName,
+			Labels:    p.Labels,
 		})
 	}
 	return pods, nil
@@ -462,6 +465,7 @@ func (c *liveClient) ListServices(ctx context.Context, _, namespace string) ([]S
 			Type:      string(svc.Spec.Type),
 			ClusterIP: svc.Spec.ClusterIP,
 			Ports:     ports,
+			Selector:  svc.Spec.Selector,
 		})
 	}
 	return services, nil

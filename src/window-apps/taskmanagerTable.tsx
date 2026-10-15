@@ -27,6 +27,8 @@ export interface DataTableProps<Row> {
   readonly depth?: (row: Row) => number;
   readonly expanded?: ReadonlySet<string>;
   readonly onToggle?: (row: Row) => void;
+  readonly onActivate?: (row: Row) => void;
+  readonly activeKey?: string;
   readonly emptyMessage?: string;
   readonly loading?: boolean;
   readonly error?: string | null;
@@ -62,6 +64,8 @@ export function DataTable<Row>(props: DataTableProps<Row>): ReactElement {
     depth,
     expanded,
     onToggle,
+    onActivate,
+    activeKey,
     emptyMessage = 'No rows',
     loading,
     error,
@@ -70,6 +74,20 @@ export function DataTable<Row>(props: DataTableProps<Row>): ReactElement {
 
   const showEmpty = rows.length === 0 && error == null && loading !== true;
   const expandedSet = expanded ?? new Set<string>();
+
+  const visibleRows: { readonly row: Row; readonly level: number }[] = [];
+  const collectVisible = (list: readonly Row[], level: number): void => {
+    for (const row of list) {
+      visibleRows.push({ row, level });
+      if (tree === true && expandedSet.has(rowKey(row))) {
+        const children = (row as { children?: readonly Row[] }).children;
+        if (Array.isArray(children)) {
+          collectVisible(children, level + 1);
+        }
+      }
+    }
+  };
+  collectVisible(rows, 0);
 
   const handleSort = (key: string): void => {
     if (onSort) {
@@ -81,6 +99,10 @@ export function DataTable<Row>(props: DataTableProps<Row>): ReactElement {
     if (onToggle) {
       onToggle(row);
     }
+  };
+
+  const handleActivate = (row: Row): void => {
+    if (onActivate) onActivate(row);
   };
 
   return (
@@ -179,21 +201,35 @@ export function DataTable<Row>(props: DataTableProps<Row>): ReactElement {
                 </td>
               </tr>
             )}
-            {rows.map((row) => {
+            {visibleRows.map(({ row, level }) => {
               const key = rowKey(row);
-              const rowDepth = depth ? depth(row) : 0;
+              const rowDepth = depth ? depth(row) : level;
               const isExpanded = expandedSet.has(key);
               const hasChildren = tree === true && onToggle !== undefined;
               const canToggle = hasChildren;
+              const isRowActive = activeKey !== undefined && activeKey === key;
 
               return (
                 <tr
                   key={key}
-                  className="kos-tm-table__row"
+                  className={isRowActive ? 'kos-tm-table__row is-active' : 'kos-tm-table__row'}
                   role="row"
                   data-key={key}
                   data-depth={String(rowDepth)}
                   data-expanded={isExpanded ? 'true' : 'false'}
+                  data-active={isRowActive ? 'true' : 'false'}
+                  onDoubleClick={() => handleActivate(row)}
+                  onKeyDown={
+                    onActivate !== undefined
+                      ? (event) => {
+                          if (event.key === 'Enter') {
+                            event.preventDefault();
+                            handleActivate(row);
+                          }
+                        }
+                      : undefined
+                  }
+                  aria-selected={isRowActive ? 'true' : 'false'}
                   tabIndex={0}
                 >
                   {columns.map((col, idx) => {

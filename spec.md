@@ -99,11 +99,23 @@ height and restore their stored geometry when un-maximized.
 - **Shell** (`src/components/`): `Window`, `WindowApp`, `WindowManager`,
   `TaskBar`, `TaskBarWindows`, `TaskBarClock`, `StartMenu`, `Contextmenu`.
 - **Window apps** (`src/window-apps/`): `TestWindow`, `ClusterExplorer` and
-  `TaskManager`, registered in `registry.ts`. Cluster Explorer lists clusters;
-  Task Manager drills down from a cluster to node detail and from a namespace to
-  its deployments / replica sets / replication controllers / services / pods and
-  pod logs. Both show *"No clusters configured — start the Go server"* when the
-  API returns none.
+  `TaskManager`, registered in `registry.ts`. Cluster Explorer lists clusters.
+  Task Manager is a Windows 11-style shell: a left icon rail with pages
+  Workloads (default), Performance, Services, Pods, Namespaces and Nodes plus a
+  Settings page pinned at the rail bottom; a per-page command bar (namespace
+  select, Refresh, update-speed select: Paused / Low 5s / Normal 2s / High 1s);
+  and a hero panel on Workloads/Performance showing cluster name, version, node
+  count and CPU/Memory/Disk gauges. Workloads renders a Deployment → ReplicaSet
+  → Pod tree table (Name / Status / CPU / Memory / Disk / Network columns) with
+  group-by (Deployment / ReplicaSet / Pod / Namespace / Node), sort and filter;
+  Performance charts CPU, memory, disk and network over time. Activating a row
+  (double-click or `Enter`) opens a right-hand **detail flyout** — the
+  replacement for the dropped breadcrumbs: workloads show a summary with
+  children and pod logs, services show ports, selector and backing pods, pods
+  show a summary with labels and logs, and nodes show the node detail
+  (capacity, allocatable, conditions and addresses). A single cluster is
+  auto-selected when one exists. Both apps show *"No clusters configured —
+  start the Go server"* when the API returns none.
 
 ## 5. Kubernetes integration (as implemented)
 
@@ -136,23 +148,35 @@ interface ClusterClient {
     container?: string,
     tailLines?: number,
   ): Promise<string>;
+  getNodeMetrics(clusterId: string): Promise<NodeMetricsResult>;
+  getPodMetrics(clusterId: string, namespace?: string): Promise<PodMetricsResult>;
 }
 ```
 
 - `ClusterInfo { id, name, server }`, `NamespaceInfo { name, status }`,
   `NodeInfo { name, status, roles, version? }`, `NodeDetailInfo { name, status,
   roles, version, capacity, allocatable, conditions, addresses }`,
-  `PodInfo { name, namespace, node?, phase }`, plus `DeploymentInfo`,
-  `ReplicaSetInfo`, `ReplicationControllerInfo` (each with a
+  `PodInfo { name, namespace, node?, phase, ownerKind?, ownerName? }`, plus
+  `DeploymentInfo`, `ReplicaSetInfo`, `ReplicationControllerInfo` (each with a
   `ReplicaCounts { desired, ready, available, updated }`) and
-  `ServiceInfo { name, namespace, type, clusterIP, ports }`.
+  `ServiceInfo { name, namespace, type, clusterIP, ports }`. `PodInfo` and
+  `ReplicaSetInfo` carry optional `ownerKind` / `ownerName` derived from the
+  controller `ownerReferences`.
+- Live metrics types: `ContainerMetrics { name, cpuMillis, memoryBytes }`,
+  `NodeMetrics { name, cpuMillis, memoryBytes, cpuAllocatableMillis?,
+  memoryAllocatableBytes?, diskUsedBytes?, diskCapacityBytes?, networkRxBytes?,
+  networkTxBytes?, podCount? }`, `PodMetrics { name, namespace, node?,
+  cpuMillis, memoryBytes, containers, diskUsedBytes?, networkRxBytes?,
+  networkTxBytes? }`, and the envelopes `NodeMetricsResult { available, nodes }`
+  and `PodMetricsResult { available, pods }`.
 - `HttpClusterClient` (the default) talks to `/api` and unwraps the server's
   `{ source, … }` envelopes.
-- `OfflineClusterClient` returns empty lists, an empty-safe `NodeDetailInfo`
-  and empty log text — the fallback that keeps the app usable with no server.
+- `OfflineClusterClient` returns empty lists, an empty-safe `NodeDetailInfo`,
+  empty log text and `{ available: false, nodes: [] }` / `{ available: false,
+  pods: [] }` metrics — the fallback that keeps the app usable with no server.
 
-The Go server (`server/main.go`) uses the standard library `net/http` and
-`k8s.io/client-go` v0.37.1:
+The Go server (`server/main.go`) uses the standard library `net/http`,
+`k8s.io/client-go` v0.37.1 and `k8s.io/metrics` v0.37.1:
 
 | Endpoint | Response |
 |---|---|
@@ -167,6 +191,16 @@ The Go server (`server/main.go`) uses the standard library `net/http` and
 | `GET /api/services?cluster=<id>&namespace=<ns>` | `{"source":…,"services":[{"name","namespace","type","clusterIP","ports"}]}` |
 | `GET /api/pods?cluster=<id>&node=<name>&namespace=<ns>&selector=<sel>` | `{"source":…,"pods":[{"name","namespace","node","phase"}]}` |
 | `GET /api/pods/logs?cluster=<id>&namespace=<ns>&pod=<name>&container=<c>&tailLines=<n>` | `{"source":…,"logs":"…"}` |
+| `GET /api/metrics/nodes?cluster=<id>` | `{"source":…,"available":bool,"nodes":[…NodeMetrics]}` |
+| `GET /api/metrics/pods?cluster=<id>&namespace=<ns>` | `{"source":…,"available":bool,"pods":[…PodMetrics]}` |
+
+The metrics endpoints read CPU/memory from `metrics.k8s.io/v1beta1` (the
+`k8s.io/metrics` client) and join node/pod disk and network from the kubelet
+**Summary API** (`nodes/<name>/proxy/stats/summary`, requires `nodes/proxy`)
+best-effort. When metrics-server is not installed or the API is unavailable the
+endpoints answer `{"available":false,"nodes":[]}` / `{"available":false,
+"pods":[]}` with **HTTP 200** — never 500; offline mode also reports
+`available:false`.
 
 Kubeconfig resolution order is `KUBERNETICOS_KUBECONFIG` → `KUBECONFIG` →
 in-cluster → `$HOME/.kube/config`. If none is usable the server must still
@@ -177,14 +211,18 @@ CORS is open (`*`) and `OPTIONS` returns 204. `/api/nodes/detail` requires
 
 ## 6. Testing
 
-- `vitest` (`npm run test`): 13 reducer tests (window add/remove/focus,
-  z-order, minimize/restore, maximize, immutability) + 19 cluster-client tests
-  (URL/query construction for every endpoint, envelope unwrapping, error
-  handling, offline fallback).
-- `playwright` (`npm run e2e`): 6 specs — the 3 desktop-shell contract specs
-  (taskbar pinned, start menu launches a window, close control) plus 3 Task
-  Manager specs (launch/title, an API-mocked cluster→namespace→pod-log
-  drill-down, and the offline empty-cluster message).
+- `vitest` (`npm run test`): 64 tests in 3 files — 13 reducer tests (window
+  add/remove/focus, z-order, minimize/restore, maximize, immutability), 22
+  cluster-client tests (URL/query construction for every endpoint including the
+  metrics ones, envelope unwrapping, error handling, offline fallback) and 29
+  Task Manager data tests (workload-tree building, owner resolution, metric
+  roll-ups, group-by/sort/filter, series merging).
+- `playwright` (`npm run e2e`): 8 specs in 2 files — the 3 desktop-shell
+  contract specs (taskbar pinned, start menu launches a window, close control)
+  plus 5 Task Manager specs (launch on the Workloads page with the cluster
+  hero, page navigation with workload-tree expansion, the offline
+  empty-cluster message, the workload detail flyout with pod logs and the
+  service/node detail flyouts).
 - Go tests (`cd server && go test ./...`): handler tests over a stub
   `ClusterClient`, offline `[]`-not-`null` assertions, 400/404/500 mapping,
   `nodeStatus`/`nodeRoles` units, and a `client-go` fake-clientset test.

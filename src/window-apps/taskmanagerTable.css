@@ -73,3 +73,8 @@
   white-space: nowrap;
   border-width: 0;
 }
+
+/* Row opened in a detail flyout (double-click / Enter) — accent-tinted, Win11-style. */
+.kos-tm-table__row.is-active {
+  background: color-mix(in srgb, var(--kos-accent) 12%, transparent);
+}

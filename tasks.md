@@ -476,9 +476,9 @@ barrel. This is what lets G1 wire the whole app before the views exist.
 ### Phase 3 — Views (parallel; all depend on Phase 0 + C1/C2/D1/D2 interfaces)
 
 > **STATUS: COMPLETE** (2026-10-15). V1–V4 compile and render their pages under
-> strict TS (`tsc -b`/`npm run build` green). **Follow-up (not done):** the
-> detail flyouts (workload children/logs flyout, service detail flyout, node
-> detail reuse) are not yet implemented.
+> strict TS (`tsc -b`/`npm run build` green). The detail flyouts are now
+> implemented: workload children + pod logs, service ports/selector/backing
+> pods, pod labels + logs, and node detail reuse.
 
 #### V1 · Workloads page — `taskmanagerProcesses.tsx` (+ `taskmanagerViews.css` section)
 * Hero (cluster identity + CPU/Mem/Disk gauges), DataTable tree from
@@ -536,9 +536,17 @@ barrel. This is what lets G1 wire the whole app before the views exist.
 
 ### Phase 5 — Tests & docs
 
-> **STATUS: NOT STARTED.** With G1 landed, the existing `e2e/taskmanager.spec.ts`
-> (written for the old breadcrumb UI) now fails; T1 must rewrite it and extend
-> `mockClusterApi` with `/api/metrics/nodes` and `/api/metrics/pods`.
+> **STATUS: COMPLETE** (2026-10-15). T1 rewrote `e2e/taskmanager.spec.ts` for the
+> new shell (extended `mockClusterApi` with `/api/metrics/nodes` +
+> `/api/metrics/pods`, owner fields and an offline mode; now 5 specs) and DOC updated
+> `README.md`, `spec.md` and `server/README.md` (pages, metrics endpoints,
+> metrics-server dependency, 15s resolution caveat, detail flyouts). `npx
+> playwright test` → 8 passed (3 desktop + 5 Task Manager); vitest 64 passed;
+> `tsc -b`, `npm run build`, prettier and eslint clean.
+> **Deviations:** the detail flyouts landed, so the spec now asserts pod logs
+> (workload and inventory), service detail and node detail; T1 also required a
+> small DataTable fix (`taskmanagerTable.tsx` never recursed into `children`, so
+> the workload tree could not expand).
 
 #### T1 · e2e — `e2e/taskmanager.spec.ts`
 * Extend `mockClusterApi` to also stub `/api/metrics/nodes` and

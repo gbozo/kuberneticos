@@ -18,6 +18,7 @@ export interface PodInfo {
   phase: string;
   ownerKind?: string; // 'ReplicaSet' | 'ReplicationController' | 'StatefulSet' | ...
   ownerName?: string;
+  readonly labels?: Readonly<Record<string, string>>;
 }
 
 export interface NamespaceInfo {
@@ -66,6 +67,7 @@ export interface ServiceInfo {
   type: string;
   clusterIP: string;
   ports: readonly ServicePortInfo[];
+  readonly selector?: Readonly<Record<string, string>>;
 }
 
 export interface NodeConditionInfo {

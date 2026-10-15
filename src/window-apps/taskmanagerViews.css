@@ -138,3 +138,215 @@
   color: var(--kos-window-fg);
   font-size: 13px;
 }
+
+/* ── Detail flyouts (tasks.md §11.1) ─────────────────────────────────────
+   A row of [main body | flyout]; full-width toolbars wrap onto their own line. */
+
+.kos-tm-view.has-flyout {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 10px 0;
+  align-items: stretch;
+}
+
+.kos-tm-view.has-flyout > .kos-tm-toolbar {
+  flex: 1 0 100%;
+}
+
+.kos-tm-view__body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.kos-tm-flyout {
+  box-sizing: border-box;
+  display: flex;
+  flex: 0 0 320px;
+  flex-direction: column;
+  max-width: 40%;
+  min-height: 0;
+  padding: 12px;
+  border-left: 1px solid var(--kos-border);
+  background: var(--kos-window-titlebar-bg, var(--kos-window-bg));
+  overflow-y: auto;
+}
+
+.kos-tm-flyout__header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--kos-border);
+}
+
+.kos-tm-flyout__title-block {
+  min-width: 0;
+}
+
+.kos-tm-flyout__title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.kos-tm-flyout__subtitle {
+  margin: 2px 0 0;
+  color: var(--kos-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.kos-tm-flyout__close {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--kos-window-fg);
+  font: inherit;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.kos-tm-flyout__close:hover {
+  background: var(--kos-hover);
+}
+
+.kos-tm-flyout__close:focus-visible {
+  outline: var(--kos-focus-outline);
+  outline-offset: -2px;
+}
+
+.kos-tm-flyout__body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.kos-tm-flyout__section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.kos-tm-flyout__section-title {
+  margin: 0;
+  color: var(--kos-muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+}
+
+.kos-tm-flyout__list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  font-size: 12px;
+  list-style: none;
+}
+
+.kos-tm-flyout__list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.kos-tm-flyout__muted {
+  color: var(--kos-muted);
+}
+
+.kos-tm-flyout__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.kos-tm-flyout__table th {
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--kos-border);
+  color: var(--kos-muted);
+  font-weight: 600;
+  text-align: left;
+}
+
+.kos-tm-flyout__table td {
+  padding: 4px 6px;
+  border-bottom: 1px solid color-mix(in srgb, var(--kos-border) 60%, transparent);
+  overflow-wrap: anywhere;
+}
+
+.kos-tm-flyout__logs {
+  margin: 0;
+  padding: 8px;
+  border: 1px solid var(--kos-border);
+  border-radius: var(--kos-window-radius);
+  background: var(--kos-input-bg);
+  color: var(--kos-window-fg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.kos-tm-flyout__error {
+  margin: 0;
+  color: var(--kos-tm-danger, #d13438);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.kos-tm-flyout__hint {
+  margin: 0;
+  color: var(--kos-muted);
+  font-size: 12px;
+}
+
+.kos-tm-kv {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.kos-tm-kv > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.kos-tm-kv > div > dt {
+  flex: 0 0 auto;
+  color: var(--kos-muted);
+}
+
+.kos-tm-kv > div > dd {
+  min-width: 0;
+  margin: 0;
+  text-align: right;
+  overflow-wrap: anywhere;
+}

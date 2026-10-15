@@ -33,12 +33,32 @@ client layer.
 
 Shipped:
 
-- A **Task Manager** window app with multi-level drill-down: cluster → nodes →
-  node detail, and namespace → deployments / replica sets / replication
-  controllers / services / pods → pod logs.
-- Read-only cluster browsing behind the typed `ClusterClient`: clusters,
-  namespaces, nodes and node detail, pods (filtered by node, namespace or label
-  selector) and pod logs, all served by the Go API.
+- A **Task Manager** window app in the style of the Windows 11 Task Manager: a
+  left icon rail (Workloads, Performance, Services, Pods, Namespaces, Nodes,
+  with Settings pinned at the rail bottom), a per-page command bar (namespace
+  select, Refresh, update speed — Paused / Low 5s / Normal 2s / High 1s) and a
+  hero panel with cluster name, version, node count and CPU/Memory/Disk gauges.
+  The Workloads page renders a Deployment → ReplicaSet → Pod tree with live
+  CPU/Memory/Disk/Network columns; the Performance page charts CPU, memory,
+  disk and network over time. Every table row can be **double-clicked (or
+  activated with Enter)** to open a right-hand **detail flyout**: workloads show
+  a summary with children and pod logs, services show ports, selector and
+  backing pods, pods show a summary with labels and logs, and nodes show the
+  node detail (capacity, allocatable, conditions and addresses).
+- The typed `ClusterClient` surface, all served by the Go API: clusters,
+  namespaces, nodes and node detail, deployments / replica sets /
+  replication controllers / services, pods (filtered by node, namespace or
+  label selector), pod logs and live metrics. Cluster Explorer lists the
+  configured clusters; the Task Manager drives the workload, performance,
+  services, pods, namespaces and nodes pages.
+
+Live CPU/memory metrics require
+[metrics-server](https://github.com/kubernetes-sigs/metrics-server) in the
+cluster; without it the API answers `{"available":false, ...}` with HTTP 200 and
+the UI shows an `available:false` state (empty metric columns, placeholder
+gauges, a "Metrics unavailable" note on Performance). Node and pod disk/network
+figures come best-effort from the kubelet Summary API
+(`nodes/<name>/proxy/stats/summary`).
 
 Planned:
 
@@ -66,7 +86,7 @@ and AI agents in [`agents.md`](agents.md).
 ### Prerequisites
 
 - Node.js 20+ and npm (the app is built with Vite).
-- Go 1.24+ (only if you run the cluster server).
+- Go 1.26+ (only if you run the cluster server).
 - A Kubernetes cluster — or minikube — reachable through a kubeconfig (optional:
   without one the server runs in offline mode).
 

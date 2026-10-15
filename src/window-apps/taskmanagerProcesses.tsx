@@ -16,6 +16,8 @@ import {
   sortNodes,
 } from './taskmanagerData';
 import type { SortDirection, SortKey } from './taskmanagerData';
+import { DetailFlyout, FlyoutSection, KeyValueList, PodLogsPanel } from './taskmanagerFlyout';
+import { formatBytes, formatCpu, formatRate } from './taskmanagerFormat';
 import { usePolledMetrics } from './taskmanagerHooks';
 import { DataTable } from './taskmanagerTable';
 import type { DataTableColumn, DataTableSort } from './taskmanagerTable';
@@ -49,6 +51,7 @@ export function ProcessesView(props: TaskManagerViewProps): ReactElement {
   const [groupByMode, setGroupByMode] = useState<GroupBy>('deployment');
   const [sort, setSort] = useState<DataTableSort>({ key: 'name', dir: 'asc' });
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
+  const [selected, setSelected] = useState<WorkloadNode | null>(null);
 
   const metrics = usePolledMetrics({
     clusterId,
@@ -57,6 +60,9 @@ export function ProcessesView(props: TaskManagerViewProps): ReactElement {
   });
 
   useEffect(() => {
+    // Data reloads whenever the cluster or namespace changes — a stale selection
+    // must never keep pointing at rows that are about to disappear.
+    setSelected(null);
     if (clusterId === undefined || clusterId === '') {
       setDeployments([]);
       setReplicaSets([]);
@@ -205,7 +211,11 @@ export function ProcessesView(props: TaskManagerViewProps): ReactElement {
 
   return (
     <div
-      className="kos-tm-view kos-tm-view--workloads"
+      className={
+        selected === null
+          ? 'kos-tm-view kos-tm-view--workloads'
+          : 'kos-tm-view kos-tm-view--workloads has-flyout'
+      }
       data-page="workloads"
       data-speed={updateSpeed}
     >
@@ -231,21 +241,90 @@ export function ProcessesView(props: TaskManagerViewProps): ReactElement {
           ))}
         </select>
       </div>
-      <DataTable<WorkloadNode>
-        columns={columns}
-        rows={tree}
-        rowKey={rowKey}
-        sort={sort}
-        onSort={handleSort}
-        tree
-        depth={depth}
-        expanded={expanded}
-        onToggle={handleToggle}
-        loading={loading}
-        error={error}
-        emptyMessage="No workloads found"
-        ariaLabel="Workloads"
-      />
+      <div className="kos-tm-view__body">
+        <DataTable<WorkloadNode>
+          columns={columns}
+          rows={tree}
+          rowKey={rowKey}
+          sort={sort}
+          onSort={handleSort}
+          tree
+          depth={depth}
+          expanded={expanded}
+          onToggle={handleToggle}
+          onActivate={(row) => setSelected(row)}
+          activeKey={selected?.id}
+          loading={loading}
+          error={error}
+          emptyMessage="No workloads found"
+          ariaLabel="Workloads"
+        />
+      </div>
+      {selected !== null && (
+        <DetailFlyout
+          title={selected.name}
+          subtitle={`${selected.kind} · ${selected.namespace ?? 'all namespaces'}`}
+          ariaLabel={`Workload details — ${selected.name}`}
+          onClose={() => setSelected(null)}
+        >
+          <FlyoutSection title="Summary">
+            <KeyValueList
+              items={[
+                { key: 'Kind', value: selected.kind },
+                { key: 'Namespace', value: selected.namespace ?? '' },
+                { key: 'Status', value: selected.status ?? '' },
+                ...(selected.cpuMillis !== undefined
+                  ? [{ key: 'CPU', value: formatCpu(selected.cpuMillis) }]
+                  : []),
+                ...(selected.memoryBytes !== undefined
+                  ? [{ key: 'Memory', value: formatBytes(selected.memoryBytes) }]
+                  : []),
+                ...(selected.diskUsedBytes !== undefined
+                  ? [{ key: 'Disk', value: formatBytes(selected.diskUsedBytes) }]
+                  : []),
+                ...(selected.networkRxBytes !== undefined
+                  ? [{ key: 'Network In', value: formatRate(selected.networkRxBytes) }]
+                  : []),
+                ...(selected.networkTxBytes !== undefined
+                  ? [{ key: 'Network Out', value: formatRate(selected.networkTxBytes) }]
+                  : []),
+                ...(selected.podCount !== undefined
+                  ? [{ key: 'Pods', value: String(selected.podCount) }]
+                  : []),
+              ]}
+            />
+          </FlyoutSection>
+          <FlyoutSection title="Children">
+            {selected.children.length > 0 ? (
+              <ul className="kos-tm-flyout__list">
+                {selected.children.map((child) => (
+                  <li key={child.id}>
+                    <span>{child.name}</span>
+                    <span className="kos-tm-flyout__muted">{child.kind}</span>
+                    {child.cpuMillis !== undefined && (
+                      <span className="kos-tm-flyout__muted">{formatCpu(child.cpuMillis)}</span>
+                    )}
+                    {child.memoryBytes !== undefined && (
+                      <span className="kos-tm-flyout__muted">{formatBytes(child.memoryBytes)}</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="kos-tm-flyout__hint">No children.</p>
+            )}
+          </FlyoutSection>
+          {selected.kind === 'pod' && selected.namespace !== undefined && (
+            <FlyoutSection title="Logs">
+              <PodLogsPanel
+                clusterId={clusterId}
+                namespace={selected.namespace}
+                pod={selected.name}
+              />
+            </FlyoutSection>
+          )}
+        </DetailFlyout>
+      )}
     </div>
   );
 }

@@ -716,9 +716,9 @@ Plus a **live smoke test** against the running kind cluster:
 > `go vet`. In the end more landed: `npm run test` (**114** vitest across 5
 > files — the C2 `DataTable` and D2 hook suites plus the Phase 6 client/action
 > tests landed after the deferral), `npm run e2e` (10 Playwright), `go test` and
-> `gofmt -l` are all **green** as of 2026-10-16. `govulncheck`/`npm audit` were
-> **not** run in this environment; the **live kind smoke test was run and
-> passed** — `/api/health` → `{"source":"live"}`, `/api/metrics/nodes` →
+> `gofmt -l` are all **green** as of 2026-10-16. `govulncheck` and `npm audit`
+> were first run during the Phase 7 gate pass and both came back clean (see
+> below); the **live kind smoke test was run and passed** — `/api/health` → `{"source":"live"}`, `/api/metrics/nodes` →
 > `available:true` (`kind-control-plane` cpu≈76m / mem≈936 MiB) and
 > `/api/metrics/pods` → 10 pods.
 
@@ -747,6 +747,11 @@ Plus a **live smoke test** against the running kind cluster:
 > var) and rejects unsafe `POST`/`DELETE` requests from a disallowed origin with
 > `403`, which defeats browser CSRF. No custom-header requirement was added, so
 > curl and server-to-server calls (no `Origin` header) keep working unchanged.
+> The full §8 gate suite was re-run during Phase 7 — `tsc -b`, `npm run build`,
+> `eslint` (2 accepted warnings), `prettier --check`, `vitest` 114/114,
+> `go build`/`vet`/`test`, `gofmt -l` empty and `playwright` 10/10 were already
+> green, and the two previously-unrun gates are now clean too: `govulncheck ./...`
+> → **no vulnerabilities**, `npm audit` → **0 vulnerabilities**.
 
 ---
 

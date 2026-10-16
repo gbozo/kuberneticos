@@ -88,6 +88,7 @@ function makeControllerNode(
     statusTone: item.replicas.ready === item.replicas.desired ? 'ok' : 'warn',
     depth,
     podCount: children.length,
+    desiredReplicas: item.replicas.desired,
     children,
   };
 }
@@ -194,6 +195,7 @@ export function buildWorkloadTree(
       statusTone: deployment.replicas.ready === deployment.replicas.desired ? 'ok' : 'warn',
       depth: 0,
       podCount: children.reduce((total, child) => total + (child.podCount ?? 0), 0),
+      desiredReplicas: deployment.replicas.desired,
       children,
     };
   });

@@ -46,9 +46,12 @@ All responses are JSON and CORS-enabled (`Access-Control-Allow-Origin: *`).
 | `GET` | `/api/namespaces?cluster=<id>` | `{"source":...,"namespaces":[Namespace...]}` |
 | `GET` | `/api/pods?cluster=<id>&node=<name>&namespace=<ns>&selector=<labelSelector>` | `{"source":...,"pods":[Pod...]}` |
 | `GET` | `/api/pods/logs?cluster=<id>&namespace=<ns>&pod=<name>&container=<c>&tailLines=<n>` | `{"source":...,"logs":"<raw log text>"}` |
+| `DELETE` | `/api/pods?cluster=<id>&namespace=<ns>&pod=<name>` | `{"source":...,"ok":true,"message":...}` (200) |
 | `GET` | `/api/deployments?cluster=<id>&namespace=<ns>` | `{"source":...,"deployments":[Deployment...]}` |
 | `GET` | `/api/replicasets?cluster=<id>&namespace=<ns>` | `{"source":...,"replicasets":[ReplicaSet...]}` |
+| `POST` | `/api/deployments/restart?cluster=<id>&namespace=<ns>&deployment=<name>` | `{"source":...,"ok":true,"message":...}` (200) |
 | `GET` | `/api/replicationcontrollers?cluster=<id>&namespace=<ns>` | `{"source":...,"replicationcontrollers":[ReplicationController...]}` |
+| `POST` | `/api/deployments/scale?cluster=<id>&namespace=<ns>&deployment=<name>&replicas=<n>` | `{"source":...,"ok":true,"message":...}` (200) |
 | `GET` | `/api/services?cluster=<id>&namespace=<ns>` | `{"source":...,"services":[Service...]}` |
 | `GET` | `/api/metrics/nodes?cluster=<id>` | `{"source":...,"available":<bool>,"nodes":[NodeMetrics...]}` |
 | `GET` | `/api/metrics/pods?cluster=<id>&namespace=<ns>` | `{"source":...,"available":<bool>,"pods":[PodMetrics...]}` |
@@ -59,18 +62,32 @@ parameters are optional unless noted; empty lists render as `[]`, never `null`.
 | Parameter | Used by | Meaning |
 |---|---|---|
 | `cluster` | all list/detail endpoints | Cluster identifier (echoed by the single configured client) |
-| `namespace` | pods, deployments, replicasets, replicationcontrollers, services, pods/logs, metrics/pods | Namespace filter; all namespaces when omitted (list endpoints scope the API call) |
+| `namespace` | pods, deployments, replicasets, replicationcontrollers, services, pods/logs, metrics/pods, `DELETE /api/pods`, `POST /api/deployments/restart`, `POST /api/deployments/scale` | Namespace filter (list endpoints) or **required** target namespace (write endpoints); missing → `400` |
 | `node` | pods | Node name, forwarded as the `spec.nodeName` field selector |
 | `selector` | pods | Kubernetes label selector string (e.g. `app=web,tier=frontend`), forwarded as `ListOptions.LabelSelector` |
 | `name` | nodes/detail | **Required** node name; missing → `400` |
-| `pod` | pods/logs | Pod name |
+| `pod` | pods/logs, `DELETE /api/pods` | Pod name (**required** for delete); missing → `400` |
 | `container` | pods/logs | Container name; omitted → the pod's default container |
 | `tailLines` | pods/logs | Lines to tail; integer, default `200`, clamped to `[1,5000]`; non-integer → `400` |
+| `deployment` | `POST /api/deployments/restart`, `POST /api/deployments/scale` | Deployment name; **required** → `400` when missing |
+| `replicas` | `POST /api/deployments/scale` | Desired replica count; integer in `[0,1000]`; missing/non-integer/out-of-range → `400` |
 
 Errors are returned as `{"error":"..."}`. Missing/invalid parameters return
-`400`; a Kubernetes `NotFound` error returns `404`; all other errors return
-`500`. Unknown methods on a known path return `405`; `OPTIONS` is answered by the
-CORS middleware with `204`.
+`400`; a Kubernetes `NotFound` error returns `404`; `Forbidden` (RBAC) return
+`403`, `Unauthorized` `401`, `Conflict` `409`, `BadRequest`/`Invalid` `400`, and
+offline mode `503`; all other errors return `500`. Unknown methods on a known
+path return `405`; `OPTIONS` is answered by the CORS middleware with `204`.
+`withCORS` allows `GET, POST, DELETE, OPTIONS`.
+
+The three write endpoints mutate the cluster:
+
+| Method | Path | Success |
+|---|---|---|
+| `DELETE` | `/api/pods?cluster=<id>&namespace=<ns>&pod=<name>` | `200` `{"source":…,"ok":true,"message":"Deleted pod <ns>/<pod>"}` |
+| `POST` | `/api/deployments/restart?cluster=<id>&namespace=<ns>&deployment=<name>` | `200` `{"source":…,"ok":true,"message":"Restarted deployment <ns>/<name>"}` |
+| `POST` | `/api/deployments/scale?cluster=<id>&namespace=<ns>&deployment=<name>&replicas=<n>` | `200` `{"source":…,"ok":true,"message":"Scaled deployment <ns>/<name> to <n> replicas"}` |
+
+Offline mode rejects them with `503` (`errOffline`) instead of mutating anything.
 
 The two metrics endpoints are the exception to the error mapping: they read
 CPU/memory from `metrics.k8s.io/v1beta1` (via the

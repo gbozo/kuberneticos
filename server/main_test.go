@@ -37,13 +37,15 @@ type stubClient struct {
 	podMetrics  PodMetricsResult
 	err         error
 
-	gotCluster   string
-	gotNode      string
-	gotNamespace string
-	gotSelector  string
-	gotPod       string
-	gotContainer string
-	gotTailLines int
+	gotCluster    string
+	gotNode       string
+	gotNamespace  string
+	gotSelector   string
+	gotPod        string
+	gotContainer  string
+	gotTailLines  int
+	gotDeployment string
+	gotReplicas   int32
 }
 
 func (s *stubClient) ListClusters(context.Context) ([]ClusterRef, error) {
@@ -139,6 +141,21 @@ func (s *stubClient) GetPodMetrics(_ context.Context, clusterID, namespace strin
 		return PodMetricsResult{}, s.err
 	}
 	return s.podMetrics, nil
+}
+
+func (s *stubClient) DeletePod(_ context.Context, clusterID, namespace, pod string) error {
+	s.gotCluster, s.gotNamespace, s.gotPod = clusterID, namespace, pod
+	return s.err
+}
+
+func (s *stubClient) RestartDeployment(_ context.Context, clusterID, namespace, deployment string) error {
+	s.gotCluster, s.gotNamespace, s.gotDeployment = clusterID, namespace, deployment
+	return s.err
+}
+
+func (s *stubClient) ScaleDeployment(_ context.Context, clusterID, namespace, deployment string, replicas int32) error {
+	s.gotCluster, s.gotNamespace, s.gotDeployment, s.gotReplicas = clusterID, namespace, deployment, replicas
+	return s.err
 }
 
 func serve(t *testing.T, client ClusterClient, method, target string) *httptest.ResponseRecorder {
@@ -605,6 +622,230 @@ func TestErrorMapping(t *testing.T) {
 			t.Errorf("error = %q, want boom", got.Error)
 		}
 	})
+}
+
+func TestHandleDeletePod(t *testing.T) {
+	t.Run("forwards arguments", func(t *testing.T) {
+		stub := &stubClient{}
+		rec := serve(t, stub, http.MethodDelete, "/api/pods?cluster=c1&namespace=default&pod=p1")
+
+		assertStatus(t, rec, http.StatusOK)
+		assertJSONContentType(t, rec)
+
+		got := decodeBody[actionResponse](t, rec)
+		if !got.OK {
+			t.Errorf("ok = false, want true")
+		}
+		if got.Source != liveSource {
+			t.Errorf("source = %q, want %q", got.Source, liveSource)
+		}
+		if got.Message != "Deleted pod default/p1" {
+			t.Errorf("message = %q, want %q", got.Message, "Deleted pod default/p1")
+		}
+		if stub.gotCluster != "c1" || stub.gotNamespace != "default" || stub.gotPod != "p1" {
+			t.Errorf("forwarded args = cluster=%q namespace=%q pod=%q", stub.gotCluster, stub.gotNamespace, stub.gotPod)
+		}
+	})
+
+	t.Run("missing namespace -> 400", func(t *testing.T) {
+		rec := serve(t, &stubClient{}, http.MethodDelete, "/api/pods?cluster=c1&pod=p1")
+
+		assertStatus(t, rec, http.StatusBadRequest)
+		assertJSONContentType(t, rec)
+		got := decodeBody[errorResponse](t, rec)
+		if got.Error == "" {
+			t.Fatal("expected an error message for a missing namespace")
+		}
+	})
+
+	t.Run("missing pod -> 400", func(t *testing.T) {
+		rec := serve(t, &stubClient{}, http.MethodDelete, "/api/pods?cluster=c1&namespace=default")
+
+		assertStatus(t, rec, http.StatusBadRequest)
+		assertJSONContentType(t, rec)
+		got := decodeBody[errorResponse](t, rec)
+		if got.Error == "" {
+			t.Fatal("expected an error message for a missing pod")
+		}
+	})
+}
+
+func TestHandleRestartDeployment(t *testing.T) {
+	stub := &stubClient{}
+	rec := serve(t, stub, http.MethodPost, "/api/deployments/restart?cluster=c1&namespace=default&deployment=web")
+
+	assertStatus(t, rec, http.StatusOK)
+	assertJSONContentType(t, rec)
+
+	got := decodeBody[actionResponse](t, rec)
+	if !got.OK {
+		t.Errorf("ok = false, want true")
+	}
+	if got.Source != liveSource {
+		t.Errorf("source = %q, want %q", got.Source, liveSource)
+	}
+	if got.Message != "Restarted deployment default/web" {
+		t.Errorf("message = %q, want %q", got.Message, "Restarted deployment default/web")
+	}
+	if stub.gotCluster != "c1" || stub.gotNamespace != "default" || stub.gotDeployment != "web" {
+		t.Errorf("forwarded args = cluster=%q namespace=%q deployment=%q", stub.gotCluster, stub.gotNamespace, stub.gotDeployment)
+	}
+
+	t.Run("missing namespace -> 400", func(t *testing.T) {
+		rec := serve(t, &stubClient{}, http.MethodPost, "/api/deployments/restart?cluster=c1&deployment=web")
+
+		assertStatus(t, rec, http.StatusBadRequest)
+		assertJSONContentType(t, rec)
+		got := decodeBody[errorResponse](t, rec)
+		if got.Error == "" {
+			t.Fatal("expected an error message for a missing namespace")
+		}
+	})
+
+	t.Run("missing deployment -> 400", func(t *testing.T) {
+		rec := serve(t, &stubClient{}, http.MethodPost, "/api/deployments/restart?cluster=c1&namespace=default")
+
+		assertStatus(t, rec, http.StatusBadRequest)
+		assertJSONContentType(t, rec)
+		got := decodeBody[errorResponse](t, rec)
+		if got.Error == "" {
+			t.Fatal("expected an error message for a missing deployment")
+		}
+	})
+}
+
+func TestHandleScaleDeployment(t *testing.T) {
+	t.Run("scales to requested replicas", func(t *testing.T) {
+		stub := &stubClient{}
+		rec := serve(t, stub, http.MethodPost, "/api/deployments/scale?cluster=c1&namespace=default&deployment=web&replicas=5")
+
+		assertStatus(t, rec, http.StatusOK)
+		assertJSONContentType(t, rec)
+
+		got := decodeBody[actionResponse](t, rec)
+		if !got.OK {
+			t.Errorf("ok = false, want true")
+		}
+		if !strings.Contains(got.Message, "5") {
+			t.Errorf("message = %q, want it to contain 5", got.Message)
+		}
+		if stub.gotReplicas != 5 {
+			t.Errorf("replicas forwarded = %d, want 5", stub.gotReplicas)
+		}
+		if stub.gotDeployment != "web" || stub.gotNamespace != "default" {
+			t.Errorf("forwarded args = namespace=%q deployment=%q", stub.gotNamespace, stub.gotDeployment)
+		}
+	})
+
+	t.Run("replicas=abc -> 400", func(t *testing.T) {
+		rec := serve(t, &stubClient{}, http.MethodPost, "/api/deployments/scale?cluster=c1&namespace=default&deployment=web&replicas=abc")
+
+		assertStatus(t, rec, http.StatusBadRequest)
+		got := decodeBody[errorResponse](t, rec)
+		if got.Error != "invalid replicas" {
+			t.Errorf("error = %q, want invalid replicas", got.Error)
+		}
+	})
+
+	t.Run("replicas=-1 -> 400", func(t *testing.T) {
+		rec := serve(t, &stubClient{}, http.MethodPost, "/api/deployments/scale?cluster=c1&namespace=default&deployment=web&replicas=-1")
+
+		assertStatus(t, rec, http.StatusBadRequest)
+		got := decodeBody[errorResponse](t, rec)
+		if got.Error != "invalid replicas" {
+			t.Errorf("error = %q, want invalid replicas", got.Error)
+		}
+	})
+
+	t.Run("missing namespace -> 400", func(t *testing.T) {
+		rec := serve(t, &stubClient{}, http.MethodPost, "/api/deployments/scale?cluster=c1&deployment=web&replicas=5")
+
+		assertStatus(t, rec, http.StatusBadRequest)
+		assertJSONContentType(t, rec)
+		got := decodeBody[errorResponse](t, rec)
+		if got.Error == "" {
+			t.Fatal("expected an error message for a missing namespace")
+		}
+	})
+
+	t.Run("missing deployment -> 400", func(t *testing.T) {
+		rec := serve(t, &stubClient{}, http.MethodPost, "/api/deployments/scale?cluster=c1&namespace=default&replicas=5")
+
+		assertStatus(t, rec, http.StatusBadRequest)
+		assertJSONContentType(t, rec)
+		got := decodeBody[errorResponse](t, rec)
+		if got.Error == "" {
+			t.Fatal("expected an error message for a missing deployment")
+		}
+	})
+
+	t.Run("replicas=1001 -> 400", func(t *testing.T) {
+		rec := serve(t, &stubClient{}, http.MethodPost, "/api/deployments/scale?cluster=c1&namespace=default&deployment=web&replicas=1001")
+
+		assertStatus(t, rec, http.StatusBadRequest)
+		got := decodeBody[errorResponse](t, rec)
+		if got.Error != "invalid replicas" {
+			t.Errorf("error = %q, want invalid replicas", got.Error)
+		}
+	})
+
+	t.Run("replicas=1000 accepted", func(t *testing.T) {
+		stub := &stubClient{}
+		rec := serve(t, stub, http.MethodPost, "/api/deployments/scale?cluster=c1&namespace=default&deployment=web&replicas=1000")
+
+		assertStatus(t, rec, http.StatusOK)
+		got := decodeBody[actionResponse](t, rec)
+		if !got.OK {
+			t.Errorf("ok = false, want true")
+		}
+		if stub.gotReplicas != 1000 {
+			t.Errorf("replicas forwarded = %d, want 1000", stub.gotReplicas)
+		}
+	})
+
+	t.Run("replicas=0 accepted", func(t *testing.T) {
+		stub := &stubClient{}
+		rec := serve(t, stub, http.MethodPost, "/api/deployments/scale?cluster=c1&namespace=default&deployment=web&replicas=0")
+
+		assertStatus(t, rec, http.StatusOK)
+		got := decodeBody[actionResponse](t, rec)
+		if !got.OK {
+			t.Errorf("ok = false, want true")
+		}
+		if stub.gotReplicas != 0 {
+			t.Errorf("replicas forwarded = %d, want 0", stub.gotReplicas)
+		}
+	})
+}
+
+func TestActionErrorsMapToStatus(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"not found -> 404", apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, "p1"), http.StatusNotFound},
+		{"forbidden -> 403", apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "p1", errors.New("no")), http.StatusForbidden},
+		{"unauthorized -> 401", apierrors.NewUnauthorized("nope"), http.StatusUnauthorized},
+		{"conflict -> 409", apierrors.NewConflict(schema.GroupResource{Resource: "pods"}, "p1", errors.New("conflict")), http.StatusConflict},
+		{"bad request -> 400", apierrors.NewBadRequest("bad"), http.StatusBadRequest},
+		{"offline -> 503", errOffline, http.StatusServiceUnavailable},
+		{"generic -> 500", errors.New("boom"), http.StatusInternalServerError},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &stubClient{err: tc.err}
+			rec := serve(t, stub, http.MethodDelete, "/api/pods?cluster=c1&namespace=default&pod=p1")
+
+			assertStatus(t, rec, tc.want)
+			assertJSONContentType(t, rec)
+			got := decodeBody[errorResponse](t, rec)
+			if got.Error == "" {
+				t.Fatal("expected a non-empty error message")
+			}
+		})
+	}
 }
 
 func TestNodeStatus(t *testing.T) {

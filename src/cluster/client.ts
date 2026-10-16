@@ -221,6 +221,14 @@ export interface ClusterClient {
   ): Promise<string>;
   getNodeMetrics(clusterId: string): Promise<NodeMetricsResult>;
   getPodMetrics(clusterId: string, namespace?: string): Promise<PodMetricsResult>;
+  deletePod(clusterId: string, namespace: string, pod: string): Promise<void>;
+  restartDeployment(clusterId: string, namespace: string, deployment: string): Promise<void>;
+  scaleDeployment(
+    clusterId: string,
+    namespace: string,
+    deployment: string,
+    replicas: number,
+  ): Promise<void>;
 }
 
 export class OfflineClusterClient implements ClusterClient {
@@ -300,16 +308,63 @@ export class OfflineClusterClient implements ClusterClient {
   async getPodMetrics(_clusterId: string, _namespace?: string): Promise<PodMetricsResult> {
     return { available: false, pods: [] };
   }
+
+  async deletePod(_clusterId: string, _namespace: string, _pod: string): Promise<void> {
+    throw offlineActionError();
+  }
+
+  async restartDeployment(
+    _clusterId: string,
+    _namespace: string,
+    _deployment: string,
+  ): Promise<void> {
+    throw offlineActionError();
+  }
+
+  async scaleDeployment(
+    _clusterId: string,
+    _namespace: string,
+    _deployment: string,
+    _replicas: number,
+  ): Promise<void> {
+    throw offlineActionError();
+  }
+}
+
+/** Actions need a real cluster; the offline client explains instead of failing silently. */
+function offlineActionError(): Error {
+  return new Error('Offline: no Kubernetes cluster is configured.');
+}
+
+async function failureFrom(response: Response, url: string): Promise<Error> {
+  let detail = '';
+  try {
+    const body: unknown = await response.json();
+    if (typeof body === 'object' && body !== null && 'error' in body) {
+      const value = (body as { error: unknown }).error;
+      if (typeof value === 'string') detail = value;
+    }
+  } catch {
+    // Non-JSON body (proxy error page, empty 204, …) — fall back to the status line.
+  }
+  return new Error(
+    `Cluster API request failed: ${response.status} ${response.statusText} (${url})${detail === '' ? '' : `: ${detail}`}`,
+  );
 }
 
 async function requestJson<T>(url: string): Promise<T> {
   const response = await fetch(url);
   if (!response.ok) {
-    throw new Error(
-      `Cluster API request failed: ${response.status} ${response.statusText} (${url})`,
-    );
+    throw await failureFrom(response, url);
   }
   return (await response.json()) as T;
+}
+
+async function requestAction(url: string, method: 'POST' | 'DELETE'): Promise<void> {
+  const response = await fetch(url, { method });
+  if (!response.ok) {
+    throw await failureFrom(response, url);
+  }
 }
 
 export class HttpClusterClient implements ClusterClient {
@@ -430,6 +485,31 @@ export class HttpClusterClient implements ClusterClient {
       `${this.baseUrl}/metrics/pods?${params.toString()}`,
     );
     return { available: envelope.available, pods: envelope.pods };
+  }
+
+  async deletePod(clusterId: string, namespace: string, pod: string): Promise<void> {
+    const params = new URLSearchParams({ cluster: clusterId, namespace, pod });
+    await requestAction(`${this.baseUrl}/pods?${params.toString()}`, 'DELETE');
+  }
+
+  async restartDeployment(clusterId: string, namespace: string, deployment: string): Promise<void> {
+    const params = new URLSearchParams({ cluster: clusterId, namespace, deployment });
+    await requestAction(`${this.baseUrl}/deployments/restart?${params.toString()}`, 'POST');
+  }
+
+  async scaleDeployment(
+    clusterId: string,
+    namespace: string,
+    deployment: string,
+    replicas: number,
+  ): Promise<void> {
+    const params = new URLSearchParams({
+      cluster: clusterId,
+      namespace,
+      deployment,
+      replicas: String(replicas),
+    });
+    await requestAction(`${this.baseUrl}/deployments/scale?${params.toString()}`, 'POST');
   }
 }
 

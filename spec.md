@@ -113,8 +113,10 @@ height and restore their stored geometry when un-maximized.
   replacement for the dropped breadcrumbs: workloads show a summary with
   children and pod logs, services show ports, selector and backing pods, pods
   show a summary with labels and logs, and nodes show the node detail
-  (capacity, allocatable, conditions and addresses). A single cluster is
-  auto-selected when one exists. Both apps show *"No clusters configured —
+  (capacity, allocatable, conditions and addresses). The pod and deployment
+  flyouts include an actions bar (End task for pods; Restart and Scale for
+  deployments) that calls the API behind a confirmation dialog and surfaces
+  RBAC errors inline. A single cluster is auto-selected when one exists. Both apps show *"No clusters configured —
   start the Go server"* when the API returns none.
 
 ## 5. Kubernetes integration (as implemented)
@@ -150,6 +152,14 @@ interface ClusterClient {
   ): Promise<string>;
   getNodeMetrics(clusterId: string): Promise<NodeMetricsResult>;
   getPodMetrics(clusterId: string, namespace?: string): Promise<PodMetricsResult>;
+  deletePod(clusterId: string, namespace: string, pod: string): Promise<void>;
+  restartDeployment(clusterId: string, namespace: string, deployment: string): Promise<void>;
+  scaleDeployment(
+    clusterId: string,
+    namespace: string,
+    deployment: string,
+    replicas: number,
+  ): Promise<void>;
 }
 ```
 
@@ -193,6 +203,15 @@ The Go server (`server/main.go`) uses the standard library `net/http`,
 | `GET /api/pods/logs?cluster=<id>&namespace=<ns>&pod=<name>&container=<c>&tailLines=<n>` | `{"source":…,"logs":"…"}` |
 | `GET /api/metrics/nodes?cluster=<id>` | `{"source":…,"available":bool,"nodes":[…NodeMetrics]}` |
 | `GET /api/metrics/pods?cluster=<id>&namespace=<ns>` | `{"source":…,"available":bool,"pods":[…PodMetrics]}` |
+| `DELETE /api/pods?cluster=<id>&namespace=<ns>&pod=<name>` | `{"source":…,"ok":true,"message":…}` (200) |
+| `POST /api/deployments/restart?cluster=<id>&namespace=<ns>&deployment=<name>` | `{"source":…,"ok":true,"message":…}` (200) |
+| `POST /api/deployments/scale?cluster=<id>&namespace=<ns>&deployment=<name>&replicas=<n>` | `{"source":…,"ok":true,"message":…}` (200) |
+
+The write endpoints (`DELETE`/`POST`) share `writeError`'s status mapping:
+`400` for a missing/invalid parameter, `401` unauthorized, `403` when RBAC denies
+the operation, `404` for an unknown resource, `409` on scale conflicts, `503`
+offline, otherwise `500`; every error body is `{"error":…}`. `withCORS` allows
+`GET, POST, DELETE, OPTIONS`.
 
 The metrics endpoints read CPU/memory from `metrics.k8s.io/v1beta1` (the
 `k8s.io/metrics` client) and join node/pod disk and network from the kubelet
@@ -211,21 +230,30 @@ CORS is open (`*`) and `OPTIONS` returns 204. `/api/nodes/detail` requires
 
 ## 6. Testing
 
-- `vitest` (`npm run test`): 64 tests in 3 files — 13 reducer tests (window
-  add/remove/focus, z-order, minimize/restore, maximize, immutability), 22
-  cluster-client tests (URL/query construction for every endpoint including the
-  metrics ones, envelope unwrapping, error handling, offline fallback) and 29
-  Task Manager data tests (workload-tree building, owner resolution, metric
-  roll-ups, group-by/sort/filter, series merging).
-- `playwright` (`npm run e2e`): 8 specs in 2 files — the 3 desktop-shell
+- `vitest` (`npm run test`): 114 tests in 5 files — 13 reducer tests (window
+  add/remove/focus, z-order, minimize/restore, maximize, immutability, event
+  bus), 28 cluster-client tests (URL/query construction for every read and write
+  endpoint including the metrics ones, envelope unwrapping, error handling,
+  offline fallback), 32 Task Manager data tests (workload-tree building, owner
+  resolution, metric roll-ups, group-by/sort/filter, series merging), 20
+  `DataTable` tests (sort, tree flatten/expand, heat cells, loading/error/empty
+  states, row activation) and 21 Task Manager hook tests (poll cadence per
+  speed, pause-on-hidden, series dedupe/cap, `localStorage` prefs; several via
+  `it.each`).
+- `playwright` (`npm run e2e`): 10 specs in 2 files — the 3 desktop-shell
   contract specs (taskbar pinned, start menu launches a window, close control)
-  plus 5 Task Manager specs (launch on the Workloads page with the cluster
+  plus 7 Task Manager specs (launch on the Workloads page with the cluster
   hero, page navigation with workload-tree expansion, the offline
-  empty-cluster message, the workload detail flyout with pod logs and the
-  service/node detail flyouts).
+  empty-cluster message, the workload detail flyout with pod logs, the
+  service/node detail flyouts, and the confirm-gated End task/Restart/Scale
+  actions including the RBAC-forbidden dialog staying open with the error
+  surfaced inline).
 - Go tests (`cd server && go test ./...`): handler tests over a stub
-  `ClusterClient`, offline `[]`-not-`null` assertions, 400/404/500 mapping,
-  `nodeStatus`/`nodeRoles` units, and a `client-go` fake-clientset test.
+  `ClusterClient`, offline `[]`-not-`null` assertions, read-path 400/404/500
+  mapping, write-action parameter validation (400 for a missing
+  namespace/pod/deployment/replicas and the 0/1000 replicas bounds), the
+  `writeError` status map (401/403/404/409/503/500), `nodeStatus`/`nodeRoles`
+  units, and a `client-go` fake-clientset test.
 - Gates: `tsc -b`, `eslint .`, `prettier --check .`, `vite build`,
   `go build ./...`, `go vet ./...`, `go test ./...`, `govulncheck ./...` and
   `npm audit` must all stay clean.

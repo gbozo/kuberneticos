@@ -103,6 +103,34 @@ describe('buildWorkloadTree', () => {
     expect(podNode.podCount).toBe(1);
   });
 
+  it('carries each controller desired replica count from its own spec.replicas', () => {
+    const [deploymentNode] = roots;
+    expect(deploymentNode.desiredReplicas).toBe(web.replicas.desired);
+    expect(deploymentNode.children[0].desiredReplicas).toBe(ownedRs.replicas.desired);
+
+    const api = deployment('api', 'default', replicas(5));
+    const apiRs = replicaSet('api-1a2b3c', 'default', replicas(2), {
+      kind: 'Deployment',
+      name: 'api',
+    });
+    const tree = buildWorkloadTree([api], [apiRs], [], []);
+    expect(tree[0].desiredReplicas).toBe(5);
+    expect(tree[0].children[0].desiredReplicas).toBe(2);
+  });
+
+  it('leaves desiredReplicas unset on pods and synthetic group roots', () => {
+    const [deploymentNode] = roots;
+    expect(deploymentNode.children[0].children[0].desiredReplicas).toBeUndefined();
+
+    const unowned = roots.find((root) => root.id === UNOWNED_REPLICASETS_GROUP_ID);
+    expect(unowned?.desiredReplicas).toBeUndefined();
+    expect(unowned?.children[0].desiredReplicas).toBe(unownedRs.replicas.desired);
+
+    const standalone = roots.find((root) => root.id === STANDALONE_PODS_GROUP_ID);
+    expect(standalone?.desiredReplicas).toBeUndefined();
+    expect(standalone?.children.every((child) => child.desiredReplicas === undefined)).toBe(true);
+  });
+
   it('attaches owned pods from the name-minus-last-hash fallback', () => {
     const fallbackPod = pod('web-7d9f-bbbbb');
     const tree = buildWorkloadTree([web], [ownedRs], [], [fallbackPod]);
@@ -282,6 +310,18 @@ describe('groupBy', () => {
     const roots = groupBy(tree, 'pod');
     expect(roots.map((root) => root.name)).toEqual(['web-7d9f-aaaaa', 'web-7d9f-bbbbb', 'debug-a']);
     expect(roots.every((root) => root.kind === 'pod' && root.depth === 0)).toBe(true);
+  });
+
+  it('keeps desiredReplicas on promoted ReplicaSets and omits it on pods', () => {
+    const roots = groupBy(tree, 'replicaset');
+    expect(roots[0].kind).toBe('replicaset');
+    expect(roots[0].desiredReplicas).toBe(ownedRs.replicas.desired);
+    expect(roots[1].desiredReplicas).toBeUndefined();
+
+    const pods = groupBy(tree, 'pod');
+    expect(pods.every((root) => root.kind === 'pod' && root.desiredReplicas === undefined)).toBe(
+      true,
+    );
   });
 
   it('groups pods by namespace', () => {

@@ -1,0 +1,129 @@
+/* Destructive workload actions for Task Manager 2.0 (tasks.md §6 / OPT-1).
+   Colours come from the --kos-* tokens; shades are derived with color-mix. */
+
+/* Positioning context for the confirm dialog so it stays inside the Task Manager
+   view (and never covers the desktop taskbar). */
+.kos-tm-actions {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.kos-tm-actions__hint {
+  margin: 0;
+  color: var(--kos-muted);
+  font-size: 12px;
+}
+
+.kos-tm-button {
+  padding: 4px 12px;
+  border: 1px solid var(--kos-border);
+  border-radius: var(--kos-window-radius);
+  background: var(--kos-input-bg);
+  color: var(--kos-window-fg);
+  font-family: var(--kos-font-family);
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.kos-tm-button:hover {
+  background: var(--kos-hover);
+}
+
+.kos-tm-button:focus-visible {
+  outline: var(--kos-focus-outline);
+}
+
+.kos-tm-button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.kos-tm-button--primary {
+  border-color: var(--kos-accent);
+  background: var(--kos-accent);
+  color: var(--kos-accent-fg);
+}
+
+.kos-tm-button--danger {
+  border-color: transparent;
+  background: var(--kos-tm-danger, #d13438);
+  color: var(--kos-accent-fg);
+}
+
+.kos-tm-dialog-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: color-mix(in srgb, var(--kos-desktop-bg) 35%, transparent);
+}
+
+.kos-tm-dialog {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 420px;
+  padding: 16px;
+  border: 1px solid var(--kos-border);
+  border-radius: var(--kos-window-radius);
+  background: var(--kos-window-bg);
+  color: var(--kos-window-fg);
+  font-family: var(--kos-font-family);
+  font-size: 13px;
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--kos-desktop-bg) 35%, transparent);
+}
+
+.kos-tm-dialog__title {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.kos-tm-dialog__message {
+  margin: 0 0 8px;
+}
+
+.kos-tm-dialog__warning {
+  margin: 0 0 8px;
+  color: var(--kos-tm-danger, #d13438);
+}
+
+.kos-tm-dialog__error {
+  margin: 0 0 8px;
+  color: var(--kos-tm-danger, #d13438);
+  font-weight: 600;
+}
+
+.kos-tm-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.kos-tm-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.kos-tm-field__label {
+  color: var(--kos-muted);
+  font-size: 12px;
+}
+
+.kos-tm-field__input {
+  box-sizing: border-box;
+  padding: 4px 8px;
+  border: 1px solid var(--kos-input-border);
+  border-radius: var(--kos-window-radius);
+  background: var(--kos-input-bg);
+  color: inherit;
+  font: inherit;
+}

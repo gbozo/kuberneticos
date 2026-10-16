@@ -7,6 +7,8 @@ import type {
   ReplicaSetInfo,
   ReplicationControllerInfo,
 } from '../cluster/client';
+import { WorkloadActions } from './taskmanagerActions';
+import type { WorkloadActionTarget } from './taskmanagerActions';
 import {
   buildWorkloadTree,
   filterNodes,
@@ -31,6 +33,11 @@ function depth(node: WorkloadNode): number {
   return node.depth;
 }
 
+/** Scale a raw consumption value against the tree maximum to a 0–100 heat value. */
+function normalizeHeat(value: number, max: number): number | null {
+  return max > 0 ? (value / max) * 100 : null;
+}
+
 const GROUP_BY_OPTIONS: readonly { value: GroupBy; label: string }[] = [
   { value: 'deployment', label: 'Deployment' },
   { value: 'replicaset', label: 'ReplicaSet' },
@@ -52,6 +59,7 @@ export function ProcessesView(props: TaskManagerViewProps): ReactElement {
   const [sort, setSort] = useState<DataTableSort>({ key: 'name', dir: 'asc' });
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const [selected, setSelected] = useState<WorkloadNode | null>(null);
+  const [reloadNonce, setReloadNonce] = useState(0);
 
   const metrics = usePolledMetrics({
     clusterId,
@@ -103,13 +111,14 @@ export function ProcessesView(props: TaskManagerViewProps): ReactElement {
     return () => {
       active = false;
     };
-  }, [clusterId, namespace]);
+  }, [clusterId, namespace, reloadNonce]);
 
   const tree = useMemo(() => {
     const base = buildWorkloadTree(deployments, replicaSets, controllers, pods);
+    const podMetricsByKey = indexPodMetrics(metrics.pods);
     const attachMetrics = (node: WorkloadNode): WorkloadNode => {
       if (node.kind === 'pod') {
-        const m = indexPodMetrics(metrics.pods).get(`${node.namespace ?? 'default'}/${node.name}`);
+        const m = podMetricsByKey.get(`${node.namespace ?? 'default'}/${node.name}`);
         return {
           ...node,
           cpuMillis: m?.cpuMillis,
@@ -137,6 +146,24 @@ export function ProcessesView(props: TaskManagerViewProps): ReactElement {
     sort.key,
     sort.dir,
   ]);
+
+  const heatMaxima = useMemo(() => {
+    let cpu = 0;
+    let memory = 0;
+    let disk = 0;
+    let network = 0;
+    const walk = (nodes: readonly WorkloadNode[]): void => {
+      for (const node of nodes) {
+        cpu = Math.max(cpu, node.cpuMillis ?? 0);
+        memory = Math.max(memory, node.memoryBytes ?? 0);
+        disk = Math.max(disk, node.diskUsedBytes ?? 0);
+        network = Math.max(network, (node.networkRxBytes ?? 0) + (node.networkTxBytes ?? 0));
+        walk(node.children);
+      }
+    };
+    walk(tree);
+    return { cpu, memory, disk, network };
+  }, [tree]);
 
   const handleSort = (key: string): void => {
     setSort((prev) => {
@@ -177,6 +204,7 @@ export function ProcessesView(props: TaskManagerViewProps): ReactElement {
         title: 'CPU',
         align: 'end',
         heat: true,
+        heatValue: (row) => normalizeHeat(row.cpuMillis ?? 0, heatMaxima.cpu),
         render: (row) => (row.cpuMillis !== undefined ? `${row.cpuMillis}m` : ''),
       },
       {
@@ -184,6 +212,7 @@ export function ProcessesView(props: TaskManagerViewProps): ReactElement {
         title: 'Memory',
         align: 'end',
         heat: true,
+        heatValue: (row) => normalizeHeat(row.memoryBytes ?? 0, heatMaxima.memory),
         render: (row) =>
           row.memoryBytes !== undefined ? `${Math.round(row.memoryBytes / 1024 / 1024)}Mi` : '',
       },
@@ -192,6 +221,7 @@ export function ProcessesView(props: TaskManagerViewProps): ReactElement {
         title: 'Disk',
         align: 'end',
         heat: true,
+        heatValue: (row) => normalizeHeat(row.diskUsedBytes ?? 0, heatMaxima.disk),
         render: (row) =>
           row.diskUsedBytes !== undefined ? `${Math.round(row.diskUsedBytes / 1024 / 1024)}Mi` : '',
       },
@@ -200,14 +230,30 @@ export function ProcessesView(props: TaskManagerViewProps): ReactElement {
         title: 'Network',
         align: 'end',
         heat: true,
+        heatValue: (row) =>
+          normalizeHeat((row.networkRxBytes ?? 0) + (row.networkTxBytes ?? 0), heatMaxima.network),
         render: (row) => {
           const total = (row.networkRxBytes ?? 0) + (row.networkTxBytes ?? 0);
           return total > 0 ? `${Math.round(total / 1024)}Ki` : '';
         },
       },
     ],
-    [],
+    [heatMaxima],
   );
+
+  const actionTarget: WorkloadActionTarget | null =
+    selected === null || selected.namespace === undefined
+      ? null
+      : selected.kind === 'pod'
+        ? { kind: 'pod', name: selected.name, namespace: selected.namespace }
+        : selected.kind === 'deployment'
+          ? {
+              kind: 'deployment',
+              name: selected.name,
+              namespace: selected.namespace,
+              replicas: selected.desiredReplicas,
+            }
+          : null;
 
   return (
     <div
@@ -294,6 +340,18 @@ export function ProcessesView(props: TaskManagerViewProps): ReactElement {
               ]}
             />
           </FlyoutSection>
+          {actionTarget !== null && (
+            <FlyoutSection title="Actions">
+              <WorkloadActions
+                clusterId={clusterId}
+                target={actionTarget}
+                onComplete={() => {
+                  setSelected(null);
+                  setReloadNonce((value) => value + 1);
+                }}
+              />
+            </FlyoutSection>
+          )}
           <FlyoutSection title="Children">
             {selected.children.length > 0 ? (
               <ul className="kos-tm-flyout__list">

@@ -34,6 +34,8 @@ export interface WorkloadNode {
   readonly networkRxBytes?: number;
   readonly networkTxBytes?: number;
   readonly podCount?: number;
+  /** Desired replicas (`spec.replicas`) for deployment/ReplicaSet rows; unset for pods/groups. */
+  readonly desiredReplicas?: number;
   readonly children: readonly WorkloadNode[];
 }
 

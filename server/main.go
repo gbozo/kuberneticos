@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -21,11 +22,13 @@ import (
 	"syscall"
 	"time"
 
+	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
+	types "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -45,7 +48,14 @@ const (
 	defaultTailLines = 200
 	minTailLines     = 1
 	maxTailLines     = 5000
+
+	// maxScaleReplicas bounds the scale action so a typo cannot ask for an absurd
+	// number of pods. Kubernetes itself has no such limit.
+	maxScaleReplicas = 1000
 )
+
+// errOffline is returned by offlineClient for actions that require a cluster.
+var errOffline = errors.New("offline: no Kubernetes cluster is configured")
 
 // ClusterRef is a lightweight identity for a reachable cluster.
 type ClusterRef struct {
@@ -213,11 +223,14 @@ type ClusterClient interface {
 	PodLogs(ctx context.Context, clusterID, namespace, pod, container string, tailLines int) (string, error)
 	GetNodeMetrics(ctx context.Context, clusterID string) (NodeMetricsResult, error)
 	GetPodMetrics(ctx context.Context, clusterID, namespace string) (PodMetricsResult, error)
+	DeletePod(ctx context.Context, clusterID, namespace, pod string) error
+	RestartDeployment(ctx context.Context, clusterID, namespace, deployment string) error
+	ScaleDeployment(ctx context.Context, clusterID, namespace, deployment string, replicas int32) error
 }
 
 // offlineClient is used whenever no Kubernetes configuration could be loaded.
-// It never errors and always returns non-nil empty slices so the API renders
-// "[]" rather than "null".
+// Read endpoints never error and always return non-nil empty slices so the API
+// renders "[]" rather than "null"; mutating actions return errOffline.
 type offlineClient struct{}
 
 func (offlineClient) ListClusters(context.Context) ([]ClusterRef, error) {
@@ -272,6 +285,18 @@ func (offlineClient) GetNodeMetrics(context.Context, string) (NodeMetricsResult,
 
 func (offlineClient) GetPodMetrics(context.Context, string, string) (PodMetricsResult, error) {
 	return PodMetricsResult{Available: false, Pods: []PodMetrics{}}, nil
+}
+
+func (offlineClient) DeletePod(context.Context, string, string, string) error {
+	return errOffline
+}
+
+func (offlineClient) RestartDeployment(context.Context, string, string, string) error {
+	return errOffline
+}
+
+func (offlineClient) ScaleDeployment(context.Context, string, string, string, int32) error {
+	return errOffline
 }
 
 // liveClient talks to a real cluster through a client-go clientset.
@@ -739,6 +764,29 @@ func (c *liveClient) GetPodMetrics(ctx context.Context, _ string, namespace stri
 	return PodMetricsResult{Available: true, Pods: out}, nil
 }
 
+// DeletePod removes a single pod from the cluster.
+func (c *liveClient) DeletePod(ctx context.Context, _, namespace, pod string) error {
+	return c.clientset.CoreV1().Pods(namespace).Delete(ctx, pod, metav1.DeleteOptions{})
+}
+
+// RestartDeployment triggers a rolling restart by bumping an annotation on the
+// pod template — the same mechanism behind `kubectl rollout restart`.
+func (c *liveClient) RestartDeployment(ctx context.Context, _, namespace, deployment string) error {
+	patch := []byte(fmt.Sprintf(`{"spec":{"template":{"metadata":{"annotations":{"kubectl.kubernetes.io/restartedAt":%q}}}}}`, time.Now().UTC().Format(time.RFC3339)))
+	_, err := c.clientset.AppsV1().Deployments(namespace).Patch(ctx, deployment, types.StrategicMergePatchType, patch, metav1.PatchOptions{})
+	return err
+}
+
+// ScaleDeployment sets the deployment's desired replica count through the
+// scale subresource, matching what `kubectl scale` does.
+func (c *liveClient) ScaleDeployment(ctx context.Context, _, namespace, deployment string, replicas int32) error {
+	_, err := c.clientset.AppsV1().Deployments(namespace).UpdateScale(ctx, deployment, &autoscalingv1.Scale{
+		ObjectMeta: metav1.ObjectMeta{Name: deployment},
+		Spec:       autoscalingv1.ScaleSpec{Replicas: replicas},
+	}, metav1.UpdateOptions{})
+	return err
+}
+
 // replicasFrom builds a Replicas view from a desired pointer plus status counts.
 func replicasFrom(desired *int32, ready, available, updated int32) Replicas {
 	return Replicas{
@@ -879,6 +927,13 @@ type podMetricsResponse struct {
 
 type errorResponse struct {
 	Error string `json:"error"`
+}
+
+// actionResponse confirms a successful mutating operation.
+type actionResponse struct {
+	Source  string `json:"source"`
+	OK      bool   `json:"ok"`
+	Message string `json:"message,omitempty"`
 }
 
 // api holds the dependencies shared by all handlers.
@@ -1045,6 +1100,94 @@ func (a *api) handleMetricsPods(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, podMetricsResponse{Source: a.source, Available: result.Available, Pods: pods})
 }
 
+func (a *api) handleDeletePod(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+
+	namespace := query.Get("namespace")
+	if namespace == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "missing required query parameter: namespace"})
+		return
+	}
+	pod := query.Get("pod")
+	if pod == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "missing required query parameter: pod"})
+		return
+	}
+
+	if err := a.client.DeletePod(r.Context(), query.Get("cluster"), namespace, pod); err != nil {
+		writeError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, actionResponse{
+		Source:  a.source,
+		OK:      true,
+		Message: fmt.Sprintf("Deleted pod %s/%s", namespace, pod),
+	})
+}
+
+func (a *api) handleRestartDeployment(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+
+	namespace := query.Get("namespace")
+	if namespace == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "missing required query parameter: namespace"})
+		return
+	}
+	deployment := query.Get("deployment")
+	if deployment == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "missing required query parameter: deployment"})
+		return
+	}
+
+	if err := a.client.RestartDeployment(r.Context(), query.Get("cluster"), namespace, deployment); err != nil {
+		writeError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, actionResponse{
+		Source:  a.source,
+		OK:      true,
+		Message: fmt.Sprintf("Restarted deployment %s/%s", namespace, deployment),
+	})
+}
+
+func (a *api) handleScaleDeployment(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+
+	namespace := query.Get("namespace")
+	if namespace == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "missing required query parameter: namespace"})
+		return
+	}
+	deployment := query.Get("deployment")
+	if deployment == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "missing required query parameter: deployment"})
+		return
+	}
+	raw := query.Get("replicas")
+	if raw == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "missing required query parameter: replicas"})
+		return
+	}
+	replicas, err := strconv.ParseInt(raw, 10, 32)
+	if err != nil || replicas < 0 || replicas > maxScaleReplicas {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid replicas"})
+		return
+	}
+
+	if err := a.client.ScaleDeployment(r.Context(), query.Get("cluster"), namespace, deployment, int32(replicas)); err != nil {
+		writeError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, actionResponse{
+		Source:  a.source,
+		OK:      true,
+		Message: fmt.Sprintf("Scaled deployment %s/%s to %d replicas", namespace, deployment, replicas),
+	})
+}
+
 // newMux wires the method-aware routes (Go 1.22+ patterns).
 func newMux(a *api) *http.ServeMux {
 	mux := http.NewServeMux()
@@ -1053,6 +1196,9 @@ func newMux(a *api) *http.ServeMux {
 	mux.HandleFunc("GET /api/nodes", a.handleNodes)
 	mux.HandleFunc("GET /api/nodes/detail", a.handleNodeDetail)
 	mux.HandleFunc("GET /api/pods", a.handlePods)
+	mux.HandleFunc("DELETE /api/pods", a.handleDeletePod)
+	mux.HandleFunc("POST /api/deployments/restart", a.handleRestartDeployment)
+	mux.HandleFunc("POST /api/deployments/scale", a.handleScaleDeployment)
 	mux.HandleFunc("GET /api/pods/logs", a.handlePodLogs)
 	mux.HandleFunc("GET /api/metrics/nodes", a.handleMetricsNodes)
 	mux.HandleFunc("GET /api/metrics/pods", a.handleMetricsPods)
@@ -1074,8 +1220,19 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 
 func writeError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
-	if apierrors.IsNotFound(err) {
-		status = http.StatusNotFound
+	switch {
+	case errors.Is(err, errOffline):
+		status = http.StatusServiceUnavailable // 503
+	case apierrors.IsNotFound(err):
+		status = http.StatusNotFound // 404
+	case apierrors.IsForbidden(err):
+		status = http.StatusForbidden // 403 — RBAC
+	case apierrors.IsUnauthorized(err):
+		status = http.StatusUnauthorized // 401
+	case apierrors.IsConflict(err):
+		status = http.StatusConflict // 409
+	case apierrors.IsInvalid(err), apierrors.IsBadRequest(err):
+		status = http.StatusBadRequest // 400
 	}
 	writeJSON(w, status, errorResponse{Error: err.Error()})
 }
@@ -1084,7 +1241,7 @@ func writeError(w http.ResponseWriter, err error) {
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
 		if r.Method == http.MethodOptions {

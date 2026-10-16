@@ -9,6 +9,8 @@ export interface DataTableColumn<Row> {
   readonly align?: 'start' | 'end';
   readonly aggregate?: string;
   readonly heat?: boolean;
+  /** Normalised 0–100 value driving the heat tint; falls back to the numeric `key` value. */
+  readonly heatValue?: (row: Row) => number | null;
   readonly render?: (row: Row) => ReactNode;
 }
 
@@ -205,8 +207,9 @@ export function DataTable<Row>(props: DataTableProps<Row>): ReactElement {
               const key = rowKey(row);
               const rowDepth = depth ? depth(row) : level;
               const isExpanded = expandedSet.has(key);
-              const hasChildren = tree === true && onToggle !== undefined;
-              const canToggle = hasChildren;
+              const children = (row as { children?: readonly Row[] }).children;
+              const hasChildren = tree === true && Array.isArray(children) && children.length > 0;
+              const canToggle = hasChildren && onToggle !== undefined;
               const isRowActive = activeKey !== undefined && activeKey === key;
 
               return (
@@ -234,8 +237,9 @@ export function DataTable<Row>(props: DataTableProps<Row>): ReactElement {
                 >
                   {columns.map((col, idx) => {
                     const raw = getRowValue(row, col.key);
-                    const num = toNumber(raw);
                     const rendered = col.render ? col.render(row) : (raw as ReactNode);
+                    const heatRaw = col.heatValue !== undefined ? col.heatValue(row) : raw;
+                    const num = toNumber(heatRaw);
                     const heatValue = col.heat === true && num !== null ? num : null;
                     const heatStyle: Record<string, string> | undefined =
                       heatValue !== null

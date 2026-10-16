@@ -115,11 +115,36 @@ const MOCK_JSON = {
 
 interface MockOptions {
   readonly offline?: boolean;
+  /** Collects `"METHOD /path?query"` for every mutating request the UI makes. */
+  readonly actions?: string[];
+  /** When true, every mutating request is refused with HTTP 403 + an RBAC-style error. */
+  readonly failActions?: boolean;
 }
 
 async function mockClusterApi(page: Page, options: MockOptions = {}): Promise<void> {
   await page.route('**/api/**', async (route) => {
     const url = new URL(route.request().url());
+    const request = route.request();
+    const method = request.method();
+    if (method === 'POST' || method === 'DELETE') {
+      options.actions?.push(`${method} ${url.pathname}${url.search}`);
+      await route.fulfill(
+        options.failActions === true
+          ? {
+              status: 403,
+              contentType: 'application/json',
+              body: JSON.stringify({
+                error: 'pods "web-abc123-xyz" is forbidden: User cannot delete resource',
+              }),
+            }
+          : {
+              status: 200,
+              contentType: 'application/json',
+              body: JSON.stringify({ source: 'mock', ok: true, message: 'ok' }),
+            },
+      );
+      return;
+    }
     const path = url.pathname;
     let payload: unknown;
     // Metrics branches must come first: `/api/metrics/nodes` also ends with
@@ -309,5 +334,99 @@ test.describe('Task Manager window app', () => {
     await expect(flyout).toBeVisible();
     await expect(flyout.getByRole('heading', { name: 'Capacity' })).toBeVisible();
     await expect(flyout).toContainText('Ready');
+  });
+
+  test('performs workload actions behind a confirmation dialog', async ({ page }) => {
+    const actions: string[] = [];
+    await mockClusterApi(page, { actions });
+    await page.goto('/');
+
+    const window = await openTaskManager(page);
+    const flyout = page.locator('aside.kos-tm-flyout');
+    // The desktop shell may expose its own role="dialog", so always scope to the
+    // Task Manager confirm dialog's class rather than a bare getByRole('dialog').
+    const dialog = page.locator('.kos-tm-dialog');
+
+    // Deployment restart from the Workloads page.
+    await window.getByRole('row', { name: /web/ }).first().dblclick();
+    await expect(flyout.getByRole('heading', { name: 'Actions' })).toBeVisible();
+    await flyout.getByRole('button', { name: 'Restart', exact: true }).click();
+
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole('heading', { name: 'Restart deployment' })).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeVisible();
+    // Opening the confirmation gate must not fire the action on its own.
+    expect(actions).toEqual([]);
+
+    await dialog.getByRole('button', { name: 'Restart' }).click();
+    await expect(dialog).toBeHidden();
+    await expect(flyout).toBeHidden(); // success also clears the row selection
+    expect(
+      actions.some(
+        (a) => /^POST .*\/api\/deployments\/restart\?/.test(a) && a.includes('deployment=web'),
+      ),
+    ).toBe(true);
+
+    // Scale: an invalid replica count keeps the dialog open without a request.
+    await window.getByRole('row', { name: /web/ }).first().dblclick();
+    await expect(flyout.getByRole('heading', { name: 'Actions' })).toBeVisible();
+    await flyout.getByRole('button', { name: 'Scale', exact: true }).click();
+
+    await expect(dialog.getByRole('heading', { name: 'Scale deployment' })).toBeVisible();
+    await dialog.getByLabel('Replicas').fill('-1');
+    await dialog.getByRole('button', { name: 'Scale' }).click();
+    await expect(dialog).toBeVisible();
+    expect(actions.some((a) => a.includes('/api/deployments/scale'))).toBe(false);
+
+    // Scale: a valid replica count posts the new size.
+    await dialog.getByLabel('Replicas').fill('5');
+    await dialog.getByRole('button', { name: 'Scale' }).click();
+    await expect(dialog).toBeHidden();
+    await expect(flyout).toBeHidden();
+    expect(
+      actions.some(
+        (a) => /^POST .*\/api\/deployments\/scale\?/.test(a) && a.includes('replicas=5'),
+      ),
+    ).toBe(true);
+
+    // End task on a pod (flattened Workloads tree).
+    await window.getByLabel('Group by').selectOption('pod');
+    await window.getByRole('row', { name: /web-abc123-xyz/ }).dblclick();
+    await expect(flyout.getByRole('heading', { name: 'Actions' })).toBeVisible();
+    await flyout.getByRole('button', { name: 'End task' }).click();
+
+    await expect(dialog.getByRole('heading', { name: 'End task' })).toBeVisible();
+    await dialog.getByRole('button', { name: 'End task' }).click();
+    await expect(dialog).toBeHidden();
+    expect(
+      actions.some((a) => /^DELETE .*\/api\/pods\?/.test(a) && a.includes('pod=web-abc123-xyz')),
+    ).toBe(true);
+  });
+
+  test('keeps the action dialog open and surfaces the RBAC error when forbidden', async ({
+    page,
+  }) => {
+    const actions: string[] = [];
+    await mockClusterApi(page, { actions, failActions: true });
+    await page.goto('/');
+
+    const window = await openTaskManager(page);
+    const rail = window.locator('nav[role="tablist"][aria-label="Task Manager"]');
+    await rail.getByRole('tab', { name: 'Pods' }).click();
+    await expect(window.locator('.kos-tm-view--inventory[data-page="pods"]')).toBeVisible();
+
+    const flyout = page.locator('aside.kos-tm-flyout');
+    await window.getByRole('row', { name: /web-abc123-xyz/ }).dblclick();
+    await expect(flyout.getByRole('heading', { name: 'Actions' })).toBeVisible();
+    await flyout.getByRole('button', { name: 'End task' }).click();
+
+    const dialog = page.locator('.kos-tm-dialog');
+    await expect(dialog.getByRole('heading', { name: 'End task' })).toBeVisible();
+    await dialog.getByRole('button', { name: 'End task' }).click();
+
+    // The request was refused: the dialog must stay open and show the server's message.
+    await expect(dialog).toBeVisible();
+    await expect(dialog.locator('[role="alert"]')).toContainText('forbidden');
+    expect(actions.some((a) => /^DELETE .*\/api\/pods\?/.test(a))).toBe(true);
   });
 });

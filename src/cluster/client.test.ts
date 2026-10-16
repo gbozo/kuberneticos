@@ -24,6 +24,15 @@ function jsonResponse(payload: unknown): Response {
   } as Response;
 }
 
+function errorResponse(status: number, statusText: string, body: unknown): Response {
+  return {
+    ok: false,
+    status,
+    statusText,
+    json: async () => body,
+  } as Response;
+}
+
 function stubFetch(payload: unknown): FetchMock {
   const fetchMock = vi.fn<(input: string | URL, init?: RequestInit) => Promise<Response>>();
   fetchMock.mockResolvedValue(jsonResponse(payload));
@@ -292,6 +301,55 @@ describe('HttpClusterClient', () => {
     );
   });
 
+  it('deletes a pod with DELETE /api/pods?cluster=abc&namespace=default&pod=p1', async () => {
+    const fetchMock = stubFetch({ source: 'go', ok: true });
+    const client = new HttpClusterClient();
+
+    await client.deletePod('abc', 'default', 'p1');
+
+    const url = requestedUrl(fetchMock);
+    expect(`${url.pathname}${url.search}`).toBe('/api/pods?cluster=abc&namespace=default&pod=p1');
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: 'DELETE' });
+  });
+
+  it('restarts a deployment with POST /api/deployments/restart', async () => {
+    const fetchMock = stubFetch({ source: 'go', ok: true });
+    const client = new HttpClusterClient();
+
+    await client.restartDeployment('abc', 'team-a', 'web');
+
+    const url = requestedUrl(fetchMock);
+    expect(`${url.pathname}${url.search}`).toBe(
+      '/api/deployments/restart?cluster=abc&namespace=team-a&deployment=web',
+    );
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: 'POST' });
+  });
+
+  it('scales a deployment with POST /api/deployments/scale and the replicas query', async () => {
+    const fetchMock = stubFetch({ source: 'go', ok: true });
+    const client = new HttpClusterClient();
+
+    await client.scaleDeployment('abc', 'team-a', 'web', 5);
+
+    const url = requestedUrl(fetchMock);
+    expect(`${url.pathname}${url.search}`).toBe(
+      '/api/deployments/scale?cluster=abc&namespace=team-a&deployment=web&replicas=5',
+    );
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: 'POST' });
+  });
+
+  it('surfaces the server error message and status on a failed action', async () => {
+    const fetchMock = vi.fn<(input: string | URL, init?: RequestInit) => Promise<Response>>();
+    fetchMock.mockResolvedValue(
+      errorResponse(403, 'Forbidden', { error: 'pods "p1" is forbidden' }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new HttpClusterClient();
+
+    await expect(client.deletePod('abc', 'default', 'p1')).rejects.toThrow(/forbidden/);
+    await expect(client.deletePod('abc', 'default', 'p1')).rejects.toThrow(/403/);
+  });
+
   it('rejects with the status when the response is not ok', async () => {
     const fetchMock = vi.fn<(input: string | URL, init?: RequestInit) => Promise<Response>>();
     fetchMock.mockResolvedValue({
@@ -304,6 +362,22 @@ describe('HttpClusterClient', () => {
     const client = new HttpClusterClient();
 
     await expect(client.listClusters()).rejects.toThrow(/500/);
+  });
+
+  it('rejects with the status when the error body is not JSON', async () => {
+    const fetchMock = vi.fn<(input: string | URL, init?: RequestInit) => Promise<Response>>();
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 502,
+      statusText: 'Bad Gateway',
+      json: async () => {
+        throw new SyntaxError('Unexpected token < in JSON');
+      },
+    } as unknown as Response);
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new HttpClusterClient();
+
+    await expect(client.deletePod('abc', 'default', 'p1')).rejects.toThrow(/502/);
   });
 });
 
@@ -359,6 +433,14 @@ describe('OfflineClusterClient', () => {
       available: false,
       pods: [],
     });
+  });
+
+  it('rejects from the action methods with an offline error', async () => {
+    const client = new OfflineClusterClient();
+
+    await expect(client.deletePod('abc', 'default', 'p1')).rejects.toThrow(/Offline/);
+    await expect(client.restartDeployment('abc', 'team-a', 'web')).rejects.toThrow(/Offline/);
+    await expect(client.scaleDeployment('abc', 'team-a', 'web', 5)).rejects.toThrow(/Offline/);
   });
 });
 

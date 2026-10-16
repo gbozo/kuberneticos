@@ -60,11 +60,15 @@ gauges, a "Metrics unavailable" note on Performance). Node and pod disk/network
 figures come best-effort from the kubelet Summary API
 (`nodes/<name>/proxy/stats/summary`).
 
+The Task Manager can also mutate the cluster (subject to RBAC): **End task**
+(`DELETE /api/pods`), **Restart** and **Scale** deployments
+(`POST /api/deployments/restart`, `POST /api/deployments/scale`). Every action
+is gated by a confirmation dialog and reports RBAC/API errors inline.
+
 Planned:
 
 - A package manager (Helm charts) that installs software into your cluster and
   integrates it with KuberneticOS.
-- Write operations (create / scale / delete) for workloads and nodes.
 
 This project is specified in [`spec.md`](spec.md) and documented for contributors
 and AI agents in [`agents.md`](agents.md).

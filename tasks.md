@@ -1,6 +1,7 @@
 # tasks.md — Task Manager 2.0 (Windows 11-style, Kubernetes-native)
 
-> **Status:** PLAN APPROVED. No code has been written yet.
+> **Status:** COMPLETE (2026-10-16). Phases 0–5 shipped and Phase 6 (destructive
+> actions) was approved and completed; see the per-phase status notes below.
 > **Goal owner:** the build orchestrator. Each task below is scoped so a single
 > subagent can complete it end-to-end, in parallel with the others, touching an
 > agreed set of files.
@@ -8,8 +9,11 @@
 > **Approved decisions (do not re-ask):** breadcrumbs are **dropped** (capability
 > moves to detail flyouts); single cluster is **auto-selected**; default page is
 > **Workloads**; update speed default is **Normal (2s poll / 15s data)**; Phase 6
-> destructive actions are **out of scope**; adding **`k8s.io/metrics`** to the
-> server is approved; **tests are deferred** this milestone (see §8).
+> destructive actions were **approved during the milestone** and shipped; adding
+> **`k8s.io/metrics`** to the server is approved; **new tests were originally
+> deferred** (see §8), but the C2/D2 acceptance suites, the Phase 6 client/action
+> tests and the metrics/action server tests all landed (**114** vitest /
+> **10** Playwright).
 
 ---
 
@@ -214,6 +218,15 @@ export interface PodMetricsResult {
 ```ts
 getNodeMetrics(clusterId: string): Promise<NodeMetricsResult>;
 getPodMetrics(clusterId: string, namespace?: string): Promise<PodMetricsResult>;
+// Phase 6 write operations (added mid-milestone):
+deletePod(clusterId: string, namespace: string, pod: string): Promise<void>;
+restartDeployment(clusterId: string, namespace: string, deployment: string): Promise<void>;
+scaleDeployment(
+  clusterId: string,
+  namespace: string,
+  deployment: string,
+  replicas: number,
+): Promise<void>;
 ```
 
 Also extend existing types (backward-compatible optional fields, needed for the
@@ -290,6 +303,16 @@ type PodMetricsResult  struct { Available bool; Pods  []PodMetrics }
   (`json:"ownerKind,omitempty"` / `json:"ownerName,omitempty"`) sourced from
   `ObjectMeta.OwnerReferences[0]`.
 * `go.mod` gains `k8s.io/metrics v0.37.1` (matches the other k8s libs).
+* **Phase 6 additions:** `ClusterClient` (Go) also gains
+  `DeletePod(ctx, clusterID, namespace, pod)`,
+  `RestartDeployment(ctx, clusterID, namespace, deployment)` and
+  `ScaleDeployment(ctx, clusterID, namespace, deployment, replicas int32)`;
+  routes `DELETE /api/pods`, `POST /api/deployments/restart`,
+  `POST /api/deployments/scale`; `actionResponse{source,ok,message}`;
+  `writeError` maps `errOffline→503`, `NotFound→404`, `Forbidden→403`,
+  `Unauthorized→401`, `Conflict→409`, `Invalid/BadRequest→400`, else `500`;
+  `withCORS` allows `GET, POST, DELETE, OPTIONS`; scale `replicas` is bounded to
+  `[0,1000]`.
 
 ---
 
@@ -297,8 +320,8 @@ type PodMetricsResult  struct { Available bool; Pods  []PodMetrics }
 
 | File | Purpose | Owner task |
 |---|---|---|
-| `src/cluster/client.ts` | +metrics types, methods,PodInfo/ReplicaSetInfo owner fields | **P0-A** |
-| `src/cluster/client.test.ts` | +tests for new methods | P0-A |
+| `src/cluster/client.ts` | +metrics types, methods, PodInfo/ReplicaSetInfo owner fields, write actions | **P0-A** / **OPT-1** |
+| `src/cluster/client.test.ts` | +tests for new methods | P0-A / OPT-1 |
 | `src/components/ui/Icon.tsx` | +new icons (union + `ICONS`) | **P0-B** |
 | `server/main.go` | +metrics structs/iface/routes/handlers + owner fields | **P0-C** / **S1** |
 | `server/main_test.go` | +metrics handler tests | **S1** |
@@ -308,10 +331,18 @@ type PodMetricsResult  struct { Available bool; Pods  []PodMetrics }
 | `src/window-apps/taskmanagerData.ts` | pure tree-building / metric-join / group-by | **D1** |
 | `src/window-apps/taskmanagerData.test.ts` | unit tests for the above | **D1** |
 | `src/window-apps/taskmanagerHooks.ts` | `usePolledMetrics`, `useSeriesBuffer`, `useLocalPref` | **D2** |
+| `src/window-apps/taskmanagerHooks.test.ts` | unit tests: poll cadence, pause-on-hidden, dedupe/cap, prefs | **D2** |
 | `src/window-apps/taskmanagerCharts.tsx` | `Sparkline`, `PerformanceChart`, `CompositionBar`, `Gauge` | **C1** |
 | `src/window-apps/taskmanagerTable.tsx` | `DataTable` (sortable, sticky, heat cells, tree support) | **C2** |
+| `src/window-apps/taskmanagerTable.test.tsx` | unit tests: sort, tree flatten/expand, heat, states | **C2** |
 | `src/window-apps/taskmanagerCommandBar.tsx` | command bar + menus + search + speed/group-by | **C2** |
-| `src/window-apps/taskmanagerViews.tsx` | the 6 page views + detail flyouts | **V1–V4** (split by section) |
+| `src/window-apps/taskmanagerViews.tsx` | re-export barrel for the 6 page views | **P0-E** |
+| `src/window-apps/taskmanagerProcesses.tsx` | Workloads page | **V1** |
+| `src/window-apps/taskmanagerPerformance.tsx` | Performance page | **V2** |
+| `src/window-apps/taskmanagerServices.tsx` | Services page | **V3** |
+| `src/window-apps/taskmanagerInventory.tsx` | Pods / Namespaces / Nodes / Settings pages | **V4** |
+| `src/window-apps/taskmanagerFlyout.tsx` | `DetailFlyout` / `FlyoutSection` / `KeyValueList` / `PodLogsPanel` | **V1–V4** |
+| `src/window-apps/taskmanagerActions.tsx`, `taskmanagerActions.css` | confirm-gated End task / Restart / Scale actions + `ConfirmDialog` | **OPT-1** |
 | `src/window-apps/TaskManager.tsx` | rewritten shell: rail + router + hero | **G1** |
 | `src/window-apps/taskmanager.css` | shell/nav/hero/command-bar/layout | **G1** |
 | `src/window-apps/taskmanagerTable.css` | table + tree + heat + pills | **C2** |
@@ -389,12 +420,17 @@ barrel. This is what lets G1 wire the whole app before the views exist.
 
 ### Phase 1 — Server metrics implementation (parallel with Phase 2+)
 
-> **STATUS: COMPLETE** (2026-10-15). S1 landed: `k8s.io/metrics v0.37.1` added
+> **STATUS: COMPLETE** (2026-10-16). S1 landed: `k8s.io/metrics v0.37.1` added
 > (direct); `GetNodeMetrics`/`GetPodMetrics` implemented on `liveClient` with the
 > availability fallback (`available:false`, HTTP 200, never 500) and best-effort
-> Summary API disk/network; `gofmt`/`go build`/`go vet` green. The live kind
-> smoke-test acceptance item was **not** run here — this environment has no
-> `kubectl`/`kind`.
+> Summary API disk/network; `gofmt`/`go build`/`go vet` green. The **live kind
+> smoke test passed**: `go run .` + `GET /api/health` →
+> `{"source":"live"}`, `/api/metrics/nodes` → `available:true` with
+> `kind-control-plane` cpu≈76m / mem≈936 MiB (capacity 4000m / 31 GiB, disk
+> 502 GiB ≈ 12 %, podCount 10), and `/api/metrics/pods` → 10 pods with CPU/mem
+> plus per-container and Summary-API disk/network figures. The `DELETE`/`POST`
+> error paths were also exercised live (`400` missing param, `404` unknown pod,
+> `400` invalid/missing replicas, `204` CORS preflight).
 
 #### S1 · Implement metrics in the Go server — owner of `server/main.go` + tests
 * Add `k8s.io/metrics v0.37.1` (`go get`), build a
@@ -423,11 +459,13 @@ barrel. This is what lets G1 wire the whole app before the views exist.
 
 ### Phase 2 — Frontend primitives (parallel with Phase 1 & each other)
 
-> **STATUS: COMPLETE** (2026-10-15). C1, C2, D1, D2 landed; `tsc -b` and
-> `npm run build` green; D1 ships 29 vitest cases covering tree building,
-> roll-up, grouping, sort, filter and dedupe. Per §8/§11 the C2 acceptance unit
-> tests and the D2 fake-timer poll-cadence tests are deferred, and the
-> `DataTable` CSS is still a follow-up (see caveats in the commit message).
+> **STATUS: COMPLETE** (2026-10-16). C1, C2, D1, D2 landed; `tsc -b` and
+> `npm run build` green; D1 ships 32 vitest cases covering tree building,
+> roll-up, grouping, sort, filter and dedupe. The `DataTable` CSS follow-up
+> landed in commit `1b808cd` (sticky sortable header, hover/active rows, heat
+> cells, tree toggles, loading/error/empty states, all on existing `--kos-*`
+> tokens). The previously deferred C2 and D2 acceptance tests are now written
+> (`taskmanagerTable.test.tsx`, `taskmanagerHooks.test.ts`).
 
 #### C1 · Charts — `taskmanagerCharts.tsx` + `taskmanagerCharts.css`
 * `<Sparkline values height stroke />` — tiny SVG polyline for table cells and
@@ -566,14 +604,25 @@ barrel. This is what lets G1 wire the whole app before the views exist.
 
 ---
 
-### Phase 6 — OPTIONAL (only if the user wants actions; NOT required)
+### Phase 6 — Destructive actions (APPROVED mid-milestone)
+
+> **STATUS: COMPLETE** (2026-10-16). The user signed off on Phase 6, so OPT-1
+> shipped: `DELETE /api/pods`, `POST /api/deployments/restart` and
+> `POST /api/deployments/scale` on the server with a `writeError` status mapping
+> (`400/401/403/404/409/503/500`), `withCORS` extended to
+> `GET, POST, DELETE, OPTIONS`, and the matching `deletePod`/`restartDeployment`/
+> `scaleDeployment` methods on `ClusterClient`. The UI adds a confirm-gated
+> actions bar (`taskmanagerActions.tsx`) to the workload and pod detail flyouts,
+> surfaces RBAC errors inline, and refreshes the row on success. Covered by
+> `client.test.ts`, `server/main_test.go` and two extra Playwright specs. All
+> gates green (tsc, build, eslint, prettier, vitest 114, go build/vet/test/gofmt,
+> playwright 10).
 
 #### OPT-1 · Destructive/k8s actions
 * "End task" → delete pod; "Restart" → rollout-restart deployment; "Scale".
 * Requires: new server routes (`DELETE /api/pods`, `POST /api/deployments/…`),
   **extending `withCORS` to allow `DELETE,POST`**, a confirmation dialog, and
-  RBAC awareness. Ship behind an explicit confirm and clear warnings. **Do not
-  start without sign-off.**
+  RBAC awareness. Ship behind an explicit confirm and clear warnings.
 
 ---
 
@@ -625,12 +674,39 @@ Plus a **live smoke test** against the running kind cluster:
 `curl localhost:8700/api/metrics/nodes` and `/api/metrics/pods` return
 `available:true`, and the UI shows non-zero CPU/Mem.
 
-> **Tests deferred (approved):** for this milestone the mandatory gates are
-> `npx tsc -b`, `npm run build`, and `go build`/`go vet`. `npm run test`,
-> `npm run e2e`, `go test`, `gofmt -l` and the security scanners are **not
-> required** and new unit/e2e tests are **out of scope** (task `T1` deferred).
-> Do not let the absence of tests block a task's acceptance — but the code must
-> still compile and build cleanly.
+> **Tests originally deferred, then shipped (approved):** originally the
+> mandatory gates were only `npx tsc -b`, `npm run build`, and `go build`/
+> `go vet`. In the end more landed: `npm run test` (**114** vitest across 5
+> files — the C2 `DataTable` and D2 hook suites plus the Phase 6 client/action
+> tests landed after the deferral), `npm run e2e` (10 Playwright), `go test` and
+> `gofmt -l` are all **green** as of 2026-10-16. `govulncheck`/`npm audit` were
+> **not** run in this environment; the **live kind smoke test was run and
+> passed** — `/api/health` → `{"source":"live"}`, `/api/metrics/nodes` →
+> `available:true` (`kind-control-plane` cpu≈76m / mem≈936 MiB) and
+> `/api/metrics/pods` → 10 pods.
+
+> **Final gate run (2026-10-16):** `tsc -b` ✅ · `npm run build` ✅ · `eslint` ✅
+> (2 accepted warnings) · `prettier --check` ✅ · `vitest` 114/114 ✅ · `go
+> build`/`vet`/`test` ✅ · `gofmt -l` empty ✅ · `playwright` 10/10 ✅.
+>
+> **Post-review hardening (2026-10-16):** an independent review of the Phase 6
+> work drove three fixes. (1) The Workloads **heat-map tint was inert**:
+> `DataTable` read the heat value from the column `key` while `WorkloadNode`
+> exposes `cpuMillis`/`memoryBytes`/`diskUsedBytes`/`networkRx|TxBytes`, so the
+> cells were never tinted and `heatValue/100` assumed a 0–100 percentage. Fixed
+> by adding a `heatValue` accessor to `DataTableColumn`, a `normalizeHeat` helper,
+> tree-wide per-column maxima (`heatMaxima`) and hoisting the pod-metric index out
+> of the recursive tree walk (also removes an O(pods×metrics) rebuild). (2) The
+> confirm dialog gained a **double-submit latch** plus a **Tab focus trap and
+> focus restore** (`taskmanagerActions.tsx`); its CSS moved off the view-owned
+> class and onto `--kos-*` tokens. (3) Eight server error-path/edge subtests were
+> added (`replicas` `0`/`1000`/`1001`, missing `namespace`/`pod`/`deployment`)
+> with exact-message assertions. The `DataTable` tree toggle was also fixed to
+> render only on rows with non-empty `children`. The net vitest count is **114**.
+> One item is left **open for a product decision**: `withCORS` still sends
+> `Access-Control-Allow-Origin: *`, which now fronts the destructive write
+> endpoints (simple `fetch` POST/DELETE are not preflighted), so the origin
+> should be restricted or a custom header required.
 
 ---
 
@@ -643,11 +719,14 @@ Plus a **live smoke test** against the running kind cluster:
 * No new npm/go runtime dependencies beyond `k8s.io/metrics`.
 * No changes to the desktop shell (taskbar, window manager, start menu, context
   menu) — only the Task Manager window app.
-* No destructive cluster actions in the core deliverable (Phase 6 only, opt-in —
-  and **Phase 6 is out of scope for this milestone**).
+* Destructive cluster actions are limited to End task (delete pod), Restart and
+  Scale (deployment) — no create/edit, no node actions. (Phase 6 was approved
+  mid-milestone and shipped; see §6 Phase 6.)
 * No breadcrumbs in the primary chrome (dropped by decision); the old drill-down
   capability survives only as detail flyouts.
-* No test work this milestone (see §8).
+* Test work was originally deferred, then shipped: the C2/D2 acceptance suites,
+  the Phase 6 client/action tests and the metrics/action server tests all landed
+  (see §8).
 
 ---
 
@@ -663,8 +742,10 @@ Plus a **live smoke test** against the running kind cluster:
 4. Services, Pods, Namespaces, Nodes, Settings pages all render live data.
 5. `available:false` empty-states appear when metrics-server is absent; nothing
    crashes offline.
-6. All gates in §8 pass; `spec.md`/`README.md` updated; every task's file
-   ownership respected.
+6. Pod and deployment flyouts offer End task / Restart / Scale behind a confirm
+   dialog, and RBAC/API failures surface inline without closing the dialog.
+7. All gates in §8 pass; `spec.md`/`README.md`/`server/README.md` updated; every
+   task's file ownership respected.
 
 ---
 
@@ -677,8 +758,11 @@ Plus a **live smoke test** against the running kind cluster:
    behaviour). Multi-cluster picker is out of scope.
 3. **Default start page** → **Workloads**.
 4. **Update speed default** → **Normal (2s poll / 15s data)**.
-5. **Phase 6 destructive actions** → **out of scope** this milestone.
+5. **Phase 6 destructive actions** → **approved mid-milestone and shipped**:
+   End task / Restart / Scale behind confirm dialogs with RBAC error surfacing.
 6. **`k8s.io/metrics`** on the server → **approved** (pin `v0.37.1` to match the
    other k8s libs).
-7. **Tests** → **deferred** this milestone; see §8. Mandatory gates are
-   `tsc -b`, `npm run build`, `go build`, `go vet`.
+7. **Tests** → **originally deferred, then shipped**: the C2/D2 suites, the
+   Phase 6 client/action tests and the Go action tests landed (114 vitest / 10
+   Playwright; see §8). Mandatory gates remain `tsc -b`, `npm run build`,
+   `go build`, `go vet`.

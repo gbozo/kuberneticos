@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState, type ReactElement } from 'react';
 import { clusterClient } from '../cluster/client';
 import type { NamespaceInfo, NodeInfo, PodInfo } from '../cluster/client';
+import { WorkloadActions } from './taskmanagerActions';
 import {
   DetailFlyout,
   FlyoutSection,
@@ -44,6 +45,7 @@ export function InventoryView(props: TaskManagerInventoryProps): ReactElement {
   const [error, setError] = useState<string | null>(null);
   const [selectedPod, setSelectedPod] = useState<PodInfo | null>(null);
   const [selectedNode, setSelectedNode] = useState<NodeInfo | null>(null);
+  const [reloadNonce, setReloadNonce] = useState(0);
 
   // A stale flyout must never survive a page/cluster/namespace change.
   useEffect(() => {
@@ -89,7 +91,7 @@ export function InventoryView(props: TaskManagerInventoryProps): ReactElement {
     return () => {
       active = false;
     };
-  }, [clusterId, namespace]);
+  }, [clusterId, namespace, reloadNonce]);
 
   const podMetricsMap = useMemo(() => indexPodMetrics(metrics.pods), [metrics.pods]);
 
@@ -239,6 +241,20 @@ export function InventoryView(props: TaskManagerInventoryProps): ReactElement {
                   ? [{ key: 'Memory', value: formatBytes(selectedPodMetrics.memoryBytes) }]
                   : []),
               ]}
+            />
+          </FlyoutSection>
+          <FlyoutSection title="Actions">
+            <WorkloadActions
+              clusterId={clusterId}
+              target={{
+                kind: 'pod',
+                name: selectedPod.name,
+                namespace: selectedPod.namespace,
+              }}
+              onComplete={() => {
+                setSelectedPod(null);
+                setReloadNonce((value) => value + 1);
+              }}
             />
           </FlyoutSection>
           <FlyoutSection title="Labels">

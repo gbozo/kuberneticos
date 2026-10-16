@@ -1,7 +1,8 @@
 # tasks.md — Task Manager 2.0 (Windows 11-style, Kubernetes-native)
 
-> **Status:** COMPLETE (2026-10-16). Phases 0–5 shipped and Phase 6 (destructive
-> actions) was approved and completed; see the per-phase status notes below.
+> **Status:** COMPLETE (2026-10-16). Phases 0–5 shipped, Phase 6 (destructive
+> actions) was approved and completed, and Phase 7 (CORS & write-endpoint
+> hardening) is done; see the per-phase status notes below.
 > **Goal owner:** the build orchestrator. Each task below is scoped so a single
 > subagent can complete it end-to-end, in parallel with the others, touching an
 > agreed set of files.
@@ -626,6 +627,42 @@ barrel. This is what lets G1 wire the whole app before the views exist.
 
 ---
 
+### Phase 7 — CORS & write-endpoint hardening
+
+> **STATUS: COMPLETE** (2026-10-16). Resolves the §8 open item by restricting the
+> origin (option A): `withCORS` now checks an exact-match allowlist, defaults to
+> the Vite dev/preview origins (`http://localhost:5173`,
+> `http://127.0.0.1:5173`, `http://localhost:4173`, `http://127.0.0.1:4173`),
+> and is overridden wholesale by `KOS_ALLOWED_ORIGINS` (comma-separated exact
+> origins). It always sets `Vary: Origin` and echoes an allowed origin exactly
+> (`Access-Control-Allow-Origin: <origin>`, never `*`); `OPTIONS` preflight and
+> unsafe `POST`/`DELETE` requests from a disallowed origin are rejected with
+> `403` `{"error":"origin not allowed"}`, while requests with no `Origin` header
+> (curl, server-to-server) always proceed. Covered by seven new
+> `server/main_test.go` cases (allowed echo, disallowed `GET` without ACAO,
+> disallowed write `403` with client-not-invoked, no-`Origin` write, allowed and
+> disallowed `OPTIONS`, and `KOS_ALLOWED_ORIGINS` replace semantics). No
+> custom-header requirement and no frontend change. All gates green (go
+> build/vet/test/gofmt, tsc, vitest 114, prettier).
+
+#### P7-1 · Harden `withCORS`
+* Replace `Access-Control-Allow-Origin: *` with an exact-origin allowlist:
+  defaults to the Vite dev/preview origins, overridden by the comma-separated
+  `KOS_ALLOWED_ORIGINS` env var (trimmed, empty entries dropped; explicit config
+  replaces the built-ins).
+* Always `Vary: Origin`; echo an allowed `Origin` exactly and set no ACAO
+  otherwise.
+* Reject `OPTIONS` preflight and unsafe `POST`/`DELETE` requests from a
+  disallowed `Origin` with `403` JSON before touching the handler; requests with
+  no `Origin` always proceed (curl smoke tests keep working).
+* Keep `GET` executing for disallowed origins (the browser blocks reading the
+  response once ACAO is absent).
+* Acceptance: `server/main_test.go` drives `withCORS(newMux(...))` through
+  `httptest` and covers all of the above; existing `serve`-based tests bypass the
+  middleware unchanged.
+
+---
+
 ## 7. Parallelisation matrix
 
 ```
@@ -703,10 +740,13 @@ Plus a **live smoke test** against the running kind cluster:
 > added (`replicas` `0`/`1000`/`1001`, missing `namespace`/`pod`/`deployment`)
 > with exact-message assertions. The `DataTable` tree toggle was also fixed to
 > render only on rows with non-empty `children`. The net vitest count is **114**.
-> One item is left **open for a product decision**: `withCORS` still sends
-> `Access-Control-Allow-Origin: *`, which now fronts the destructive write
-> endpoints (simple `fetch` POST/DELETE are not preflighted), so the origin
-> should be restricted or a custom header required.
+> One item was left **open for a product decision** and is now **resolved by
+> Phase 7**: `withCORS` no longer sends `Access-Control-Allow-Origin: *`.
+> Instead it uses an exact-origin allowlist (defaults to the Vite dev/preview
+> origins, replaced wholesale by the comma-separated `KOS_ALLOWED_ORIGINS` env
+> var) and rejects unsafe `POST`/`DELETE` requests from a disallowed origin with
+> `403`, which defeats browser CSRF. No custom-header requirement was added, so
+> curl and server-to-server calls (no `Origin` header) keep working unchanged.
 
 ---
 
@@ -766,3 +806,8 @@ Plus a **live smoke test** against the running kind cluster:
    Phase 6 client/action tests and the Go action tests landed (114 vitest / 10
    Playwright; see §8). Mandatory gates remain `tsc -b`, `npm run build`,
    `go build`, `go vet`.
+8. **CORS / write-endpoint hardening** → **origin allowlist** via
+   `KOS_ALLOWED_ORIGINS` (defaults to the Vite dev/preview origins), with unsafe
+   `POST`/`DELETE` requests from a disallowed origin rejected server-side with
+   `403` and exact-origin ACAO echo (never `*`); **no custom header** required
+   (shipped as Phase 7).

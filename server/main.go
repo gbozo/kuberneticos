@@ -1237,17 +1237,70 @@ func writeError(w http.ResponseWriter, err error) {
 	writeJSON(w, status, errorResponse{Error: err.Error()})
 }
 
-// withCORS allows the Vite dev server (and any other origin) to call the API.
+// defaultAllowedOrigins are the origins allowed by default (Vite dev + preview).
+var defaultAllowedOrigins = []string{
+	"http://localhost:5173",
+	"http://127.0.0.1:5173",
+	"http://localhost:4173",
+	"http://127.0.0.1:4173",
+}
+
+// parseAllowedOrigins returns the configured CORS allowlist. An unset or empty
+// KOS_ALLOWED_ORIGINS falls back to defaultAllowedOrigins; a set-but-all-empty
+// value (e.g. ",") yields an empty list, so an operator can intentionally
+// disable every browser origin. Entries are trimmed and empties dropped.
+func parseAllowedOrigins() []string {
+	raw := os.Getenv("KOS_ALLOWED_ORIGINS")
+	if raw == "" {
+		return defaultAllowedOrigins
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func isOriginAllowed(origin string) bool {
+	for _, o := range parseAllowedOrigins() {
+		if o == origin {
+			return true
+		}
+	}
+	return false
+}
+
+// withCORS restricts origins and enforces write-endpoint hardening.
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Vary", "Origin")
+
+		origin := r.Header.Get("Origin")
+		// A disallowed (or absent) origin gets no Access-Control-Allow-Origin.
+		allowed := origin != "" && isOriginAllowed(origin)
+		if allowed {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		}
+
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if origin != "" && !allowed {
+			switch r.Method {
+			case http.MethodOptions, http.MethodPost, http.MethodDelete:
+				writeJSON(w, http.StatusForbidden, errorResponse{Error: "origin not allowed"})
+				return
+			}
+		}
 
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
+
 		next.ServeHTTP(w, r)
 	})
 }

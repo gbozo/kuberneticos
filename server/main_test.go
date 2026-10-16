@@ -999,3 +999,129 @@ func TestLiveClientListPodsAndGetNode(t *testing.T) {
 		t.Errorf("GetNode addresses = %+v", detail.Addresses)
 	}
 }
+
+func serveCORS(t *testing.T, client ClusterClient, method, target, origin string) *httptest.ResponseRecorder {
+	t.Helper()
+	mux := withCORS(newMux(&api{client: client, source: liveSource}))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(method, target, nil)
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestParseAllowedOrigins(t *testing.T) {
+	cases := []struct {
+		name string
+		env  string
+		want []string
+	}{
+		{"unset/empty uses defaults", "", defaultAllowedOrigins},
+		{"explicit list is trimmed", "https://a.example, http://localhost:5173", []string{"https://a.example", "http://localhost:5173"}},
+		{"all-empty disables browser origins", " , ", []string{}},
+		{"duplicates are preserved", "https://a.example,https://a.example", []string{"https://a.example", "https://a.example"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("KOS_ALLOWED_ORIGINS", tc.env)
+			if got := parseAllowedOrigins(); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("parseAllowedOrigins() = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCORS_AllowedOriginGET(t *testing.T) {
+	t.Setenv("KOS_ALLOWED_ORIGINS", "")
+	s := &stubClient{clusters: []ClusterRef{{ID: "c1", Name: "c1"}}}
+	rec := serveCORS(t, s, http.MethodGet, "/api/clusters", "http://localhost:5173")
+	assertStatus(t, rec, http.StatusOK)
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:5173" {
+		t.Fatalf("ACAO = %q, want http://localhost:5173", got)
+	}
+	if got := rec.Header().Get("Vary"); !strings.Contains(got, "Origin") {
+		t.Fatalf("Vary = %q, want to contain Origin", got)
+	}
+}
+
+func TestCORS_DisallowedOriginGETNoACAO(t *testing.T) {
+	t.Setenv("KOS_ALLOWED_ORIGINS", "")
+	s := &stubClient{clusters: []ClusterRef{{ID: "c1", Name: "c1"}}}
+	rec := serveCORS(t, s, http.MethodGet, "/api/clusters", "https://evil.example")
+	assertStatus(t, rec, http.StatusOK)
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("ACAO = %q, want empty", got)
+	}
+}
+
+func TestCORS_DisallowedOriginWriteForbidden(t *testing.T) {
+	t.Setenv("KOS_ALLOWED_ORIGINS", "")
+	cases := []struct {
+		name   string
+		method string
+		target string
+	}{
+		{"scale POST", http.MethodPost, "/api/deployments/scale?cluster=c1&namespace=ns&deployment=d&replicas=2"},
+		{"delete pod", http.MethodDelete, "/api/pods?cluster=c1&namespace=ns&pod=p1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &stubClient{}
+			rec := serveCORS(t, s, tc.method, tc.target, "https://evil.example")
+			assertStatus(t, rec, http.StatusForbidden)
+			body := decodeBody[errorResponse](t, rec)
+			if body.Error != "origin not allowed" {
+				t.Fatalf("error = %q, want origin not allowed", body.Error)
+			}
+			if s.gotDeployment != "" || s.gotPod != "" {
+				t.Fatalf("client should not be invoked on forbidden write")
+			}
+		})
+	}
+}
+
+func TestCORS_NoOriginWriteAllowed(t *testing.T) {
+	t.Setenv("KOS_ALLOWED_ORIGINS", "")
+	s := &stubClient{pods: []Pod{{Name: "p1"}}}
+	rec := serveCORS(t, s, http.MethodDelete, "/api/pods?cluster=c1&namespace=ns&pod=p1", "")
+	assertStatus(t, rec, http.StatusOK)
+	if s.gotPod != "p1" {
+		t.Fatalf("client should be invoked")
+	}
+}
+
+func TestCORS_OptionsAllowed(t *testing.T) {
+	t.Setenv("KOS_ALLOWED_ORIGINS", "")
+	s := &stubClient{}
+	rec := serveCORS(t, s, http.MethodOptions, "/api/clusters", "http://localhost:5173")
+	assertStatus(t, rec, http.StatusNoContent)
+	if got := rec.Header().Get("Access-Control-Allow-Methods"); got == "" {
+		t.Fatalf("allow-methods missing")
+	}
+}
+
+func TestCORS_OptionsDisallowedForbidden(t *testing.T) {
+	t.Setenv("KOS_ALLOWED_ORIGINS", "")
+	s := &stubClient{}
+	rec := serveCORS(t, s, http.MethodOptions, "/api/clusters", "https://evil.example")
+	assertStatus(t, rec, http.StatusForbidden)
+}
+
+func TestCORS_EnvReplaceSemantics(t *testing.T) {
+	t.Setenv("KOS_ALLOWED_ORIGINS", "https://ops.example.com")
+	s := &stubClient{clusters: []ClusterRef{{ID: "c1", Name: "c1"}}}
+	// default no longer allowed
+	rec := serveCORS(t, s, http.MethodGet, "/api/clusters", "http://localhost:5173")
+	assertStatus(t, rec, http.StatusOK)
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("ACAO should be empty for disallowed when replaced")
+	}
+	// configured allowed
+	rec = serveCORS(t, s, http.MethodGet, "/api/clusters", "https://ops.example.com")
+	assertStatus(t, rec, http.StatusOK)
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://ops.example.com" {
+		t.Fatalf("ACAO mismatch")
+	}
+}

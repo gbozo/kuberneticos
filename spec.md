@@ -210,8 +210,14 @@ The Go server (`server/main.go`) uses the standard library `net/http`,
 The write endpoints (`DELETE`/`POST`) share `writeError`'s status mapping:
 `400` for a missing/invalid parameter, `401` unauthorized, `403` when RBAC denies
 the operation, `404` for an unknown resource, `409` on scale conflicts, `503`
-offline, otherwise `500`; every error body is `{"error":…}`. `withCORS` allows
-`GET, POST, DELETE, OPTIONS`.
+offline, otherwise `500`; every error body is `{"error":…}`. `withCORS`
+restricts CORS to an exact-origin allowlist (defaults to the Vite dev/preview
+origins, replaced by the comma-separated `KOS_ALLOWED_ORIGINS` env var), echoes
+an allowed `Origin` exactly and otherwise sends no `Access-Control-Allow-Origin`
+header, always sets `Vary: Origin`, and allows
+`GET, POST, DELETE, OPTIONS`. Requests with no `Origin` (curl, server-to-server)
+always proceed; `POST`/`DELETE` and `OPTIONS` from a disallowed origin get `403`
+`{"error":"origin not allowed"}` before reaching the handler.
 
 The metrics endpoints read CPU/memory from `metrics.k8s.io/v1beta1` (the
 `k8s.io/metrics` client) and join node/pod disk and network from the kubelet
@@ -224,7 +230,8 @@ endpoints answer `{"available":false,"nodes":[]}` / `{"available":false,
 Kubeconfig resolution order is `KUBERNETICOS_KUBECONFIG` → `KUBECONFIG` →
 in-cluster → `$HOME/.kube/config`. If none is usable the server must still
 start and answer `"source":"offline"` with empty lists — it must never crash.
-CORS is open (`*`) and `OPTIONS` returns 204. `/api/nodes/detail` requires
+CORS uses an origin allowlist (never `*`; see `KOS_ALLOWED_ORIGINS` above), and
+`OPTIONS` from an allowed origin returns 204. `/api/nodes/detail` requires
 `name` (400 without it); a missing node or pod returns 404. Pod logs default to
 `tailLines=200`, clamped to 1–5000.
 

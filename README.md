@@ -108,7 +108,7 @@ The dev server proxies `/api` to the Go server at `http://localhost:8700`
 
 ```bash
 cd server
-go run .             # listens on :8700, CORS-enabled JSON API
+go run .             # listens on :8700, CORS-restricted JSON API
 ```
 
 Without cluster configuration the server still starts and answers with

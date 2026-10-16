@@ -32,10 +32,16 @@ go run .
 | `PORT` | `8700` | HTTP listen port |
 | `KUBERNETICOS_KUBECONFIG` | — | Explicit kubeconfig path (takes precedence over `KUBECONFIG`) |
 | `KUBECONFIG` | — | Standard kubeconfig path, used if `KUBERNETICOS_KUBECONFIG` is unset |
+| `KOS_ALLOWED_ORIGINS` | Vite dev + preview origins | Comma-separated exact CORS origins; set it to **replace** the defaults |
 
 ## Endpoints
 
-All responses are JSON and CORS-enabled (`Access-Control-Allow-Origin: *`).
+All responses are JSON. CORS is **origin-restricted**: an allowlist (defaults to
+`http://localhost:5173`, `http://127.0.0.1:5173`, `http://localhost:4173` and
+`http://127.0.0.1:4173`; override with the comma-separated
+`KOS_ALLOWED_ORIGINS`) is echoed exactly as
+`Access-Control-Allow-Origin: <origin>` — never `*` — and every response carries
+`Vary: Origin`.
 
 | Method | Path | Response |
 |---|---|---|
@@ -76,8 +82,13 @@ Errors are returned as `{"error":"..."}`. Missing/invalid parameters return
 `400`; a Kubernetes `NotFound` error returns `404`; `Forbidden` (RBAC) return
 `403`, `Unauthorized` `401`, `Conflict` `409`, `BadRequest`/`Invalid` `400`, and
 offline mode `503`; all other errors return `500`. Unknown methods on a known
-path return `405`; `OPTIONS` is answered by the CORS middleware with `204`.
-`withCORS` allows `GET, POST, DELETE, OPTIONS`.
+path return `405`; `OPTIONS` preflight from an allowed origin is answered by the
+CORS middleware with `204`. `withCORS` allows `GET, POST, DELETE, OPTIONS` and
+sets `Vary: Origin` on every response. Requests may carry an `Origin` in the
+allowlist (echoed exactly), no `Origin` (curl, server-to-server — always
+allowed), or a disallowed `Origin`: the latter get no ACAO header, so `GET` still
+runs but the browser blocks reading it, while `POST`/`DELETE` and `OPTIONS` are
+rejected with `403` `{"error":"origin not allowed"}` before the handler runs.
 
 The three write endpoints mutate the cluster:
 
@@ -247,4 +258,5 @@ Offline mode also reports `available:false`.
 ## Frontend integration
 
 The repo's `vite.config.ts` proxies `/api` to `http://localhost:8700`, so the
-web desktop can call these endpoints during `vite dev` without CORS setup.
+web desktop can call these endpoints during `vite dev` without any extra CORS
+setup (the dev origin is in the default allowlist).

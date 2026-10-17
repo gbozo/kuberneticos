@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -36,6 +37,10 @@ type stubClient struct {
 	nodeMetrics NodeMetricsResult
 	podMetrics  PodMetricsResult
 	err         error
+
+	// blockOnContext makes GetNodeMetrics wait for its context to be cancelled
+	// and return the context error, emulating an unresponsive kubelet proxy.
+	blockOnContext bool
 
 	gotCluster    string
 	gotNode       string
@@ -127,8 +132,12 @@ func (s *stubClient) PodLogs(_ context.Context, clusterID, namespace, pod, conta
 	return s.logs, nil
 }
 
-func (s *stubClient) GetNodeMetrics(_ context.Context, clusterID string) (NodeMetricsResult, error) {
+func (s *stubClient) GetNodeMetrics(ctx context.Context, clusterID string) (NodeMetricsResult, error) {
 	s.gotCluster = clusterID
+	if s.blockOnContext {
+		<-ctx.Done()
+		return NodeMetricsResult{}, ctx.Err()
+	}
 	if s.err != nil {
 		return NodeMetricsResult{}, s.err
 	}
@@ -624,6 +633,96 @@ func TestErrorMapping(t *testing.T) {
 	})
 }
 
+// TestSummaryPerCallBudget pins the per-call deadline derivation: one kubelet
+// summary call gets min(summaryCallTimeout, remaining request budget), and an
+// exhausted request budget skips fetches instead of issuing doomed calls.
+func TestSummaryPerCallBudget(t *testing.T) {
+	t.Run("no request deadline grants the full call timeout", func(t *testing.T) {
+		got, ok := summaryPerCallBudget(context.Background())
+		if !ok || got != summaryCallTimeout {
+			t.Fatalf("summaryPerCallBudget = %v, %v; want %v, true", got, ok, summaryCallTimeout)
+		}
+	})
+
+	t.Run("large remaining budget is capped at 3s", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		got, ok := summaryPerCallBudget(ctx)
+		if !ok || got != summaryCallTimeout {
+			t.Fatalf("summaryPerCallBudget = %v, %v; want %v, true", got, ok, summaryCallTimeout)
+		}
+	})
+
+	t.Run("small remaining budget is granted as-is", func(t *testing.T) {
+		const remaining = time.Second
+		ctx, cancel := context.WithTimeout(context.Background(), remaining)
+		defer cancel()
+		got, ok := summaryPerCallBudget(ctx)
+		if !ok {
+			t.Fatal("summaryPerCallBudget ok = false; want true")
+		}
+		if got > remaining || got <= remaining-100*time.Millisecond {
+			t.Fatalf("summaryPerCallBudget = %v, want within (100ms, %v]", got, remaining)
+		}
+	})
+
+	t.Run("exhausted request budget skips fetches", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), -time.Second)
+		defer cancel()
+		if _, ok := summaryPerCallBudget(ctx); ok {
+			t.Fatal("summaryPerCallBudget ok = true; want false for an already-expired deadline")
+		}
+	})
+}
+
+// TestRequestTimeoutReturns504 proves the request-level budget: with the same
+// middleware chain as production, a handler that never completes turns into a
+// 504 with the standard error JSON once the injected deadline fires.
+func TestRequestTimeoutReturns504(t *testing.T) {
+	stub := &stubClient{blockOnContext: true}
+	handler := withLogging(withCORS(withRequestTimeout(50 * time.Millisecond)(newMux(&api{client: stub, source: liveSource}))))
+
+	start := time.Now()
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/metrics/nodes?cluster=c1", nil))
+	elapsed := time.Since(start)
+
+	assertStatus(t, rec, http.StatusGatewayTimeout)
+	assertJSONContentType(t, rec)
+	got := decodeBody[errorResponse](t, rec)
+	if !strings.Contains(got.Error, "deadline") {
+		t.Errorf("error = %q, want a deadline-exceeded message", got.Error)
+	}
+	if elapsed < 50*time.Millisecond {
+		t.Errorf("handler returned after %s, before the 50ms deadline fired", elapsed)
+	}
+	if elapsed > 10*time.Second {
+		t.Errorf("handler took %s, far beyond the deadline", elapsed)
+	}
+}
+
+// The middleware must not touch requests that already carry a deadline: with a
+// 300ms incoming deadline the response arrives at the incoming expiry, not at
+// the middleware's (shorter) 50ms budget.
+func TestRequestTimeoutPassesThroughExistingDeadline(t *testing.T) {
+	stub := &stubClient{blockOnContext: true}
+	handler := withRequestTimeout(50 * time.Millisecond)(newMux(&api{client: stub, source: liveSource}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/api/metrics/nodes?cluster=c1", nil).WithContext(ctx)
+	handler.ServeHTTP(rec, r)
+	elapsed := time.Since(start)
+
+	assertStatus(t, rec, http.StatusGatewayTimeout)
+	if elapsed < 290*time.Millisecond {
+		t.Errorf("handler returned after %s, cutting into the incoming 300ms deadline (middleware overrode it?)", elapsed)
+	}
+}
+
 func TestHandleDeletePod(t *testing.T) {
 	t.Run("forwards arguments", func(t *testing.T) {
 		stub := &stubClient{}
@@ -830,6 +929,7 @@ func TestActionErrorsMapToStatus(t *testing.T) {
 		{"conflict -> 409", apierrors.NewConflict(schema.GroupResource{Resource: "pods"}, "p1", errors.New("conflict")), http.StatusConflict},
 		{"bad request -> 400", apierrors.NewBadRequest("bad"), http.StatusBadRequest},
 		{"offline -> 503", errOffline, http.StatusServiceUnavailable},
+		{"deadline exceeded -> 504", context.DeadlineExceeded, http.StatusGatewayTimeout},
 		{"generic -> 500", errors.New("boom"), http.StatusInternalServerError},
 	}
 

@@ -352,18 +352,73 @@ async function failureFrom(response: Response, url: string): Promise<Error> {
   );
 }
 
-async function requestJson<T>(url: string): Promise<T> {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw await failureFrom(response, url);
+/** Hard cap for every Cluster API request so a hung server cannot exhaust the connection pool. */
+export const REQUEST_TIMEOUT_MS = 15000;
+
+/**
+ * `fetch` with a request timeout: aborts after `REQUEST_TIMEOUT_MS` and converts the abort
+ * into a clear error. Calls the global `fetch` directly (no captured reference) so global
+ * stubs keep working, and passes the URL through untouched.
+ */
+async function fetchWithTimeout(url: string, init?: RequestInit): Promise<PendingRequest> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let response: Response;
+  try {
+    response = await fetch(url, { ...init, signal: controller.signal });
+  } catch (err) {
+    clearTimeout(timer);
+    if (controller.signal.aborted) {
+      throw timeoutError(url);
+    }
+    throw err;
   }
-  return (await response.json()) as T;
+  return {
+    response,
+    // The timer deliberately stays armed after `fetch` settles so the timeout also covers
+    // the body read. Call `done()` once the response has been consumed (both paths).
+    done: () => clearTimeout(timer),
+    isAborted: () => controller.signal.aborted,
+  };
+}
+
+interface PendingRequest {
+  readonly response: Response;
+  /** Releases the request timeout; must be called once the body has been consumed. */
+  readonly done: () => void;
+  readonly isAborted: () => boolean;
+}
+
+function timeoutError(url: string): Error {
+  return new Error(`Cluster API request timed out after ${REQUEST_TIMEOUT_MS / 1000}s (${url})`);
+}
+
+async function requestJson<T>(url: string): Promise<T> {
+  const { response, done, isAborted } = await fetchWithTimeout(url);
+  try {
+    if (!response.ok) {
+      throw await failureFrom(response, url);
+    }
+    return (await response.json()) as T;
+  } catch (err) {
+    if (isAborted()) throw timeoutError(url);
+    throw err;
+  } finally {
+    done();
+  }
 }
 
 async function requestAction(url: string, method: 'POST' | 'DELETE'): Promise<void> {
-  const response = await fetch(url, { method });
-  if (!response.ok) {
-    throw await failureFrom(response, url);
+  const { response, done, isAborted } = await fetchWithTimeout(url, { method });
+  try {
+    if (!response.ok) {
+      throw await failureFrom(response, url);
+    }
+  } catch (err) {
+    if (isAborted()) throw timeoutError(url);
+    throw err;
+  } finally {
+    done();
   }
 }
 

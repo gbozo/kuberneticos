@@ -31,6 +31,12 @@ export interface PolledMetricsState {
 
 export type UsePolledMetrics = (options: PolledMetricsOptions) => PolledMetricsState;
 
+/** Identity of a poll, used to key the single-flight guard and to discard stale results. */
+interface InFlightPoll {
+  readonly clusterId?: string;
+  readonly namespace?: string;
+}
+
 /** Poll node + pod metrics for the selected cluster at the configured update speed. */
 export function usePolledMetrics(options: PolledMetricsOptions): PolledMetricsState {
   const { clusterId, namespace, updateSpeed } = options;
@@ -40,6 +46,7 @@ export function usePolledMetrics(options: PolledMetricsOptions): PolledMetricsSt
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const mounted = useRef(true);
+  const currentRef = useRef<InFlightPoll>({ clusterId, namespace });
 
   useEffect(() => {
     mounted.current = true;
@@ -48,6 +55,12 @@ export function usePolledMetrics(options: PolledMetricsOptions): PolledMetricsSt
     };
   }, []);
 
+  // Mirror of the latest cluster/namespace: requests settle asynchronously, so a poll
+  // started for one cluster must not write state after the selection has changed.
+  useEffect(() => {
+    currentRef.current = { clusterId, namespace };
+  }, [clusterId, namespace]);
+
   const load = useCallback(async (): Promise<void> => {
     if (clusterId === undefined || clusterId === '') {
       setNodes([]);
@@ -55,34 +68,55 @@ export function usePolledMetrics(options: PolledMetricsOptions): PolledMetricsSt
       setAvailable(false);
       return;
     }
+    const stale = (): boolean =>
+      currentRef.current.clusterId !== clusterId || currentRef.current.namespace !== namespace;
     try {
       const [nodeResult, podResult] = await Promise.all([
         clusterClient.getNodeMetrics(clusterId),
         clusterClient.getPodMetrics(clusterId, namespace),
       ]);
-      if (!mounted.current) return;
+      if (!mounted.current || stale()) return;
       setNodes(nodeResult.nodes);
       setPods(podResult.pods);
       setAvailable(nodeResult.available || podResult.available);
       setError(null);
       setLastUpdated(Date.now());
     } catch (err) {
-      if (!mounted.current) return;
+      if (!mounted.current || stale()) return;
       setError(err instanceof Error ? err.message : String(err));
     }
   }, [clusterId, namespace]);
 
+  // Manual `refresh` and the interval both go through `poll`. The guard is keyed to the
+  // poll's cluster/namespace: overlapping ticks for the same selection are skipped, a
+  // change of selection is never blocked by the old pending request, and only the poll
+  // that currently owns the slot may release it (a superseded request must not unlock it).
+  const inFlight = useRef<InFlightPoll | null>(null);
+  const poll = useCallback(async (): Promise<void> => {
+    const owner: InFlightPoll = { clusterId, namespace };
+    const current = inFlight.current;
+    if (current !== null && current.clusterId === clusterId && current.namespace === namespace) {
+      return;
+    }
+    inFlight.current = owner;
+    try {
+      await load();
+    } finally {
+      if (inFlight.current === owner) inFlight.current = null;
+    }
+  }, [load, clusterId, namespace]);
+
   useEffect(() => {
-    void load();
+    void poll();
     const intervalMs = UPDATE_SPEED_INTERVAL_MS[updateSpeed];
     if (intervalMs <= 0) return;
     const timer = window.setInterval(() => {
-      if (!document.hidden) void load();
+      if (!document.hidden) void poll();
     }, intervalMs);
     return () => window.clearInterval(timer);
-  }, [load, updateSpeed]);
+  }, [poll, updateSpeed]);
 
-  return { nodes, pods, available, error, lastUpdated, refresh: load };
+  return { nodes, pods, available, error, lastUpdated, refresh: poll };
 }
 
 /** Rolling sample buffer honouring the append-only-on-change dedupe rule. */

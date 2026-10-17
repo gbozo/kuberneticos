@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -43,6 +44,14 @@ const (
 	liveSource    = "live"
 
 	shutdownTimeout = 5 * time.Second
+
+	// requestTimeout is the server-side budget for every HTTP request;
+	// summaryCallTimeout is the per-node budget for one kubelet stats/summary
+	// call, taken from the request budget with summaryFetchConcurrency nodes
+	// in flight so an unresponsive kubelet cannot stall an endpoint.
+	requestTimeout          = 15 * time.Second
+	summaryCallTimeout      = 3 * time.Second
+	summaryFetchConcurrency = 4
 
 	// Pod log streaming defaults and bounds for the tailLines query parameter.
 	defaultTailLines = 200
@@ -615,22 +624,77 @@ func (c *liveClient) nodeSummary(ctx context.Context, name string) (summaryRespo
 	return summary, nil
 }
 
+// summaryPerCallBudget derives the deadline to grant ONE kubelet stats/summary
+// call from the request context: min(summaryCallTimeout, remaining). The
+// request context stays the parent, so across all summary waves the total
+// summary time is bounded by the request deadline — once that budget runs out,
+// pending calls fail fast and their nodes are skipped instead of pushing the
+// whole endpoint into a request-level 504. The second return is false when the
+// request budget is already exhausted and no fetch should be attempted.
+func summaryPerCallBudget(ctx context.Context) (time.Duration, bool) {
+	dl, ok := ctx.Deadline()
+	if !ok {
+		return summaryCallTimeout, true
+	}
+	remaining := time.Until(dl)
+	if remaining <= 0 {
+		return 0, false
+	}
+	return min(summaryCallTimeout, remaining), true
+}
+
 // podSummaries collects the kubelet Summary API pod entries for every node the
 // given pods are scheduled on, keyed by "namespace/name". It is best effort:
-// any node whose summary cannot be fetched is skipped.
+// any node whose summary cannot be fetched (or does not answer within the
+// summaryPerCallBudget deadline) is skipped. Nodes are fetched concurrently,
+// bounded by summaryFetchConcurrency; each node's result lands in its own
+// slice slot and the results are merged after the wait, so goroutines share no
+// mutable state.
 func (c *liveClient) podSummaries(ctx context.Context, nodeByPod map[string]string) map[string]summaryPod {
-	nodes := map[string]struct{}{}
+	nodeSet := map[string]struct{}{}
 	for _, node := range nodeByPod {
-		nodes[node] = struct{}{}
+		nodeSet[node] = struct{}{}
 	}
+
+	nodes := make([]string, 0, len(nodeSet))
+	for node := range nodeSet {
+		nodes = append(nodes, node)
+	}
+
+	per, ok := summaryPerCallBudget(ctx)
+	if !ok {
+		return map[string]summaryPod{} // request budget exhausted: skip all nodes
+	}
+
+	perNode := make([]map[string]summaryPod, len(nodes))
+	sem := make(chan struct{}, summaryFetchConcurrency)
+	var wg sync.WaitGroup
+	for i, node := range nodes {
+		wg.Add(1)
+		go func(i int, node string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			sctx, cancel := context.WithTimeout(ctx, per)
+			defer cancel()
+			summary, err := c.nodeSummary(sctx, node)
+			if err != nil {
+				return
+			}
+			pods := map[string]summaryPod{}
+			for _, pod := range summary.Pods {
+				pods[pod.PodRef.Namespace+"/"+pod.PodRef.Name] = pod
+			}
+			perNode[i] = pods
+		}(i, node)
+	}
+	wg.Wait()
+
 	out := map[string]summaryPod{}
-	for node := range nodes {
-		summary, err := c.nodeSummary(ctx, node)
-		if err != nil {
-			continue
-		}
-		for _, pod := range summary.Pods {
-			out[pod.PodRef.Namespace+"/"+pod.PodRef.Name] = pod
+	for _, pods := range perNode {
+		for key, pod := range pods {
+			out[key] = pod
 		}
 	}
 	return out
@@ -687,14 +751,42 @@ func (c *liveClient) GetNodeMetrics(ctx context.Context, _ string) (NodeMetricsR
 			}
 		}
 		nm.PodCount = podCounts[item.Name]
-		if summary, err := c.nodeSummary(ctx, item.Name); err == nil {
-			nm.DiskUsedBytes = summary.Node.FS.UsedBytes
-			nm.DiskCapacityBytes = summary.Node.FS.CapacityBytes
-			nm.NetworkRxBytes = summary.Node.Network.RxBytes
-			nm.NetworkTxBytes = summary.Node.Network.TxBytes
-		}
 		out = append(out, nm)
 	}
+
+	// Fetch each node's kubelet summary concurrently, bounded by
+	// summaryFetchConcurrency, with a per-call deadline capped at
+	// summaryCallTimeout but never above the request budget remaining (the
+	// request context is the parent), so an unresponsive kubelet costs a
+	// skippable few seconds and large clusters fail fast instead of exhausting
+	// the 15s request budget. Goroutines only touch their own out[i] slot;
+	// results keep the nodes' ordering.
+	per, ok := summaryPerCallBudget(ctx)
+	if !ok {
+		return NodeMetricsResult{Available: true, Nodes: out}, nil // request budget exhausted: skip summaries
+	}
+	sem := make(chan struct{}, summaryFetchConcurrency)
+	var wg sync.WaitGroup
+	for i := range out {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			sctx, cancel := context.WithTimeout(ctx, per)
+			defer cancel()
+			summary, err := c.nodeSummary(sctx, out[i].Name)
+			if err != nil {
+				return // best effort: this node keeps missing disk/network fields
+			}
+			out[i].DiskUsedBytes = summary.Node.FS.UsedBytes
+			out[i].DiskCapacityBytes = summary.Node.FS.CapacityBytes
+			out[i].NetworkRxBytes = summary.Node.Network.RxBytes
+			out[i].NetworkTxBytes = summary.Node.Network.TxBytes
+		}(i)
+	}
+	wg.Wait()
 
 	return NodeMetricsResult{Available: true, Nodes: out}, nil
 }
@@ -1221,6 +1313,8 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 func writeError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
 	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		status = http.StatusGatewayTimeout // 504 — request / summary budget exhausted
 	case errors.Is(err, errOffline):
 		status = http.StatusServiceUnavailable // 503
 	case apierrors.IsNotFound(err):
@@ -1271,6 +1365,23 @@ func isOriginAllowed(origin string) bool {
 		}
 	}
 	return false
+}
+
+// withRequestTimeout bounds every request with a context deadline so a slow
+// cluster client cannot pin handler goroutines indefinitely. A request that
+// already carries a deadline is passed through unchanged. The production chain
+// uses requestTimeout; tests inject a shorter value.
+func withRequestTimeout(d time.Duration) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, hasDeadline := r.Context().Deadline(); !hasDeadline {
+				ctx, cancel := context.WithTimeout(r.Context(), d)
+				defer cancel()
+				r = r.WithContext(ctx)
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // withCORS restricts origins and enforces write-endpoint hardening.
@@ -1405,7 +1516,7 @@ func main() {
 	}
 
 	client, source := buildClient()
-	handler := withLogging(withCORS(newMux(&api{client: client, source: source})))
+	handler := withLogging(withCORS(withRequestTimeout(requestTimeout)(newMux(&api{client: client, source: source}))))
 
 	srv := &http.Server{
 		Addr:              ":" + port,

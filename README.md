@@ -145,7 +145,10 @@ npm run preview      # serve the production build locally
   window is frontmost below the taskbar, blur/minimize/restore are distinct.
 - **Cluster access** is centralized in the typed `ClusterClient`
   (`src/cluster/client.ts`): an offline default and an HTTP implementation that
-  talks to the Go server. No ad-hoc `fetch` calls in components.
+  talks to the Go server. No ad-hoc `fetch` calls in components. Every request
+  carries a 15s timeout (`REQUEST_TIMEOUT_MS`) so a stuck `/api` call aborts
+  with a clear error instead of hanging a connection forever; the server
+  matches that with its own 15s request budget (see `server/README.md`).
 
 ## ✍️ Authors
 

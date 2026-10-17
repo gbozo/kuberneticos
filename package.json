@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev-server": "cd server & go run main.go",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "lint": "eslint .",

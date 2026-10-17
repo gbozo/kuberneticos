@@ -1,7 +1,12 @@
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clusterClient } from '../cluster/client';
-import type { NodeMetrics, PodMetrics } from '../cluster/client';
+import type {
+  NodeMetrics,
+  NodeMetricsResult,
+  PodMetrics,
+  PodMetricsResult,
+} from '../cluster/client';
 import {
   UPDATE_SPEED_INTERVAL_MS,
   useLocalPref,
@@ -92,6 +97,49 @@ describe('usePolledMetrics', () => {
     await advance(20000);
     expect(getNodeMetrics).toHaveBeenCalledTimes(1);
     expect(getPodMetrics).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips overlapping polls while a request is in flight', async () => {
+    const nodeDeferreds: Array<(value: NodeMetricsResult) => void> = [];
+    const podDeferreds: Array<(value: PodMetricsResult) => void> = [];
+    getNodeMetrics.mockImplementation(
+      () =>
+        new Promise<NodeMetricsResult>((resolve) => {
+          nodeDeferreds.push(resolve);
+        }),
+    );
+    getPodMetrics.mockImplementation(
+      () =>
+        new Promise<PodMetricsResult>((resolve) => {
+          podDeferreds.push(resolve);
+        }),
+    );
+
+    const { result } = renderHook(() =>
+      usePolledMetrics({ clusterId: 'prod', namespace: 'default', updateSpeed: 'normal' }),
+    );
+    await advance(0);
+    expect(getNodeMetrics).toHaveBeenCalledTimes(1);
+    expect(getPodMetrics).toHaveBeenCalledTimes(1);
+
+    const interval = UPDATE_SPEED_INTERVAL_MS.normal;
+    await advance(interval * 4);
+    expect(getNodeMetrics).toHaveBeenCalledTimes(1);
+    expect(getPodMetrics).toHaveBeenCalledTimes(1);
+    expect(result.current.error).toBeNull();
+
+    await act(async () => {
+      nodeDeferreds[0]({ available: true, nodes: [nodeA] });
+      podDeferreds[0]({ available: true, pods: [podA] });
+    });
+    expect(result.current.nodes).toEqual([nodeA]);
+    expect(result.current.pods).toEqual([podA]);
+    expect(result.current.available).toBe(true);
+    expect(result.current.error).toBeNull();
+
+    await advance(interval);
+    expect(getNodeMetrics).toHaveBeenCalledTimes(2);
+    expect(getPodMetrics).toHaveBeenCalledTimes(2);
   });
 
   const cadenceCases: ReadonlyArray<[UpdateSpeed, number]> = [

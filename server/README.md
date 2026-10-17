@@ -81,7 +81,11 @@ parameters are optional unless noted; empty lists render as `[]`, never `null`.
 Errors are returned as `{"error":"..."}`. Missing/invalid parameters return
 `400`; a Kubernetes `NotFound` error returns `404`; `Forbidden` (RBAC) return
 `403`, `Unauthorized` `401`, `Conflict` `409`, `BadRequest`/`Invalid` `400`, and
-offline mode `503`; all other errors return `500`. Unknown methods on a known
+offline mode `503`; all other errors return `500`. Every request is wrapped by
+the `withRequestTimeout` middleware: unless the caller already set a deadline,
+the server gives it a shared **15s context budget** and a deadline-exceeded
+error (e.g. from the cluster client or a stuck kubelet) is answered with
+`504` `{"error":"context deadline exceeded"}`. Unknown methods on a known
 path return `405`; `OPTIONS` preflight from an allowed origin is answered by the
 CORS middleware with `204`. `withCORS` allows `GET, POST, DELETE, OPTIONS` and
 sets `Vary: Origin` on every response. Requests may carry an `Origin` in the
@@ -105,8 +109,12 @@ CPU/memory from `metrics.k8s.io/v1beta1` (via the
 [`k8s.io/metrics`](https://github.com/kubernetes/metrics) v0.37.1 client) and
 join node/pod disk and network figures best-effort from the kubelet **Summary
 API** (`nodes/<name>/proxy/stats/summary` through the `nodes/proxy`
-subresource, so the service account needs `nodes/proxy`). When metrics-server is
-not installed or the metrics API is unreachable they return
+subresource, so the service account needs `nodes/proxy`). Per-node summaries
+are fetched in parallel (max 4 nodes in flight) and each call's deadline is
+capped at 3s but never above the request's remaining 15s budget (the request
+context stays the parent), so slow nodes are skipped and large clusters fail
+fast instead of all metrics being lost to a request-level 504. When metrics-server is not installed or the metrics API is
+unreachable they return
 `{"source":...,"available":false,"nodes":[]}` /
 `{"source":...,"available":false,"pods":[]}` with **HTTP 200** — never a 500.
 Offline mode also reports `available:false`.

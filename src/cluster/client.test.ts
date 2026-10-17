@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { HttpClusterClient, OfflineClusterClient, createClusterClient } from './client';
+import {
+  HttpClusterClient,
+  OfflineClusterClient,
+  REQUEST_TIMEOUT_MS,
+  createClusterClient,
+} from './client';
 import type {
   ClusterInfo,
   DeploymentInfo,
@@ -378,6 +383,35 @@ describe('HttpClusterClient', () => {
     const client = new HttpClusterClient();
 
     await expect(client.deletePod('abc', 'default', 'p1')).rejects.toThrow(/502/);
+  });
+
+  it('aborts a request that exceeds the timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi.fn<(input: string | URL, init?: RequestInit) => Promise<Response>>();
+      fetchMock.mockImplementation(
+        (_input, init) =>
+          new Promise<Response>((_, reject) => {
+            init?.signal?.addEventListener('abort', () =>
+              reject(new DOMException('The operation was aborted.', 'AbortError')),
+            );
+          }),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+      const client = new HttpClusterClient();
+
+      const pending = client.listClusters();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0][1]?.signal).toBeInstanceOf(AbortSignal);
+
+      vi.advanceTimersByTime(REQUEST_TIMEOUT_MS);
+      const url = String(fetchMock.mock.calls[0][0]);
+      await expect(pending).rejects.toThrow(
+        `Cluster API request timed out after ${REQUEST_TIMEOUT_MS / 1000}s (${url})`,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

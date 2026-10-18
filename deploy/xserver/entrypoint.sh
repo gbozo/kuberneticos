@@ -54,12 +54,14 @@ for n in $(seq "$XDISPLAY_START" "$XDISPLAY_END"); do
     echo ""
     echo "[program:openbox-${n}]"
     echo "environment=DISPLAY=\":${n}\",XAUTHORITY=\"${XAUTH_FILE}\""
-    echo "command=openbox --display :${n}"
+    echo "command=openbox"
     echo "autorestart=true"
     echo ""
     echo "[program:vnc-${n}]"
     echo "environment=XAUTHORITY=\"${XAUTH_FILE}\""
-    echo "command=x11vnc -display :${n} -rfbport ${vnc_port} -listen 0.0.0.0 -forever -shared -nopw"
+    # No -listen: it would put x11vnc into reverse-connection passive mode
+    # (no RFB 003.008 banner on connect). -rfbport binds on all interfaces.
+    echo "command=x11vnc -display :${n} -rfbport ${vnc_port} -forever -shared -nopw"
     echo "autorestart=true"
   } >>"$RUNTIME_CONF"
 done

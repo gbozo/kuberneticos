@@ -33,9 +33,13 @@ ENV XDISPLAY_START=21 \
 
 # Non-root runtime user (uid/gid 1000). All of Xvfb/x11vnc/openbox bind only
 # unprivileged ports, so no root is needed anywhere in this image.
-RUN useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash kos
+RUN groupadd --gid 1000 kos && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash kos
 
 WORKDIR /kos
+# WORKDIR creates the dir as root even under USER kos, so hand it over —
+# supervisord and the entrypoint both write here (runtime conf, log, pid,
+# unix socket, .Xauthority).
+RUN chown -R kos:kos /kos
 COPY --chown=kos:kos supervisord.conf /kos/supervisord.conf
 COPY --chown=kos:kos entrypoint.sh /usr/local/bin/kos-entrypoint
 RUN chmod 0755 /usr/local/bin/kos-entrypoint

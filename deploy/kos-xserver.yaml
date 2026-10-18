@@ -94,16 +94,24 @@ spec:
             - { name: 'vnc-28', containerPort: 5928, protocol: TCP }
             - { name: 'vnc-29', containerPort: 5929, protocol: TCP }
             - { name: 'vnc-30', containerPort: 5930, protocol: TCP }
-          # Probes watch the first display's VNC port (5921): a live probe
-          # means x11vnc is up and the display loop is serving.
+          # NOTE: probes must NOT touch x11vnc (RFB) ports. kubelet's tcpSocket
+          # probe connects-and-immediately-disconnects every period; that
+          # abandoned-connection pattern wedges libvncserver's accept thread
+          # (100% CPU on the probed x11vnc, RFB banner never sent to later
+          # clients, pod flapping Ready/unready). Instead we probe the X11 TCP
+          # port of the first display's Xvfb — X clients may connect/disconnect
+          # freely, and a live X listener is exactly what the xauth/launch flow
+          # needs. (x11vnc health itself is implicit: it serves only -already-
+          # authorized clients and any real noVNC connection proves it.)
           readinessProbe:
-            tcpSocket:
-              port: 5921
+            exec:
+              command: ['bash', '-c', 'exec 3<>/dev/tcp/localhost/6021']
             initialDelaySeconds: 10
             periodSeconds: 10
+            timeoutSeconds: 3
           livenessProbe:
-            tcpSocket:
-              port: 5921
+            exec:
+              command: ['bash', '-c', 'exec 3<>/dev/tcp/localhost/6021']
             initialDelaySeconds: 30
             periodSeconds: 30
           volumeMounts:

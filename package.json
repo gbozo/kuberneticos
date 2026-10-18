@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev-server": "cd server & go build . & go run .",
+    "dev-server": "cd server && air -c .air.toml",
+    "dev-server:plain": "cd server && go run .",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "lint": "eslint .",

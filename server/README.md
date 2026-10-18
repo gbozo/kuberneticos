@@ -25,6 +25,12 @@ cd server
 go run .
 ```
 
+With a rebuild-on-save loop instead, run `[air](https://github.com/air-verse/air)`
+from the repo root — `npm run dev-server` (config `server/.air.toml`; it builds
+the whole package into `server/tmp/` and restarts on every non-test source
+change). Without air installed, `npm run dev-server:plain` matches the command
+above.
+
 ## Environment variables
 
 | Variable | Default | Purpose |

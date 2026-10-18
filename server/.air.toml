@@ -1,0 +1,25 @@
+# air live-reload for the kos API server (https://github.com/air-verse/air).
+# Run from server/ via the root script:  npm run dev-server
+# (falls back to `npm run dev-server:plain` = go run . if air is absent).
+root = "."
+tmp_dir = "./tmp"
+
+[build]
+# Whole-package build (a single-file `go run main.go` would hide xdisplay.go/exec.go).
+cmd = "go build -o ./tmp/kuberneticos-server.exe ."
+entrypoint = ["./tmp/kuberneticos-server.exe"]
+delay = 500
+# go.mod/go.sum changes trigger a rebuild the same as source edits.
+include_ext = ["go", "mod"]
+include_dir = []
+exclude_dir = ["tmp"]
+exclude_regex = ["_test\\.go"]
+# Stop the previous binary before building (Windows: single instance on :8700).
+stop_on_root = true
+
+[log]
+time = false
+
+[misc]
+# Remove the ./tmp build directory when quitting.
+clean_on_exit = true

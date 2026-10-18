@@ -101,6 +101,7 @@ and AI agents in [`agents.md`](agents.md).
 ```bash
 npm install
 npm run dev          # Vite dev server, http://localhost:5173
+npm run dev-server   # kos API server with air live-reload (cd server, .air.toml)
 ```
 
 The dev server proxies `/api` to the Go server at `http://localhost:8700`

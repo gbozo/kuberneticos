@@ -86,3 +86,6 @@ _testmain.go
 /test-results/
 /playwright-report/
 
+
+# air live-reload build cache (server/)
+server/tmp/

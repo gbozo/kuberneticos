@@ -1,0 +1,69 @@
+/* XDesktop — remote GUI app session rendered inside the window client area. */
+
+.kos-xdesktop {
+  position: relative;
+  /* Cancel .kos-window__body padding so the remote canvas spans the full
+     client area edge-to-edge. Keep in sync with window.css (12px padding). */
+  margin: -12px;
+  height: calc(100% + 24px);
+  overflow: hidden;
+  background: var(--kos-desktop-bg);
+}
+
+.kos-xdesktop__status {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  text-align: center;
+  background: var(--kos-desktop-bg);
+  color: var(--kos-taskbar-fg);
+  font-family: var(--kos-font-family);
+  font-size: 13px;
+  z-index: 1;
+}
+
+.kos-xdesktop__status[data-kind='error'] > .kos-xdesktop__status-icon {
+  color: var(--kos-accent);
+}
+
+.kos-xdesktop__display {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  padding: 2px 8px;
+  border: 1px solid var(--kos-border);
+  border-radius: 2px;
+  background: var(--kos-input-bg);
+  color: var(--kos-muted);
+  font-size: 11px;
+  font-family: var(--kos-font-family);
+  pointer-events: none;
+}
+
+.kos-xdesktop__retry {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: 1px solid var(--kos-input-border);
+  border-radius: 2px;
+  background: var(--kos-input-bg);
+  color: var(--kos-taskbar-fg);
+  font: inherit;
+  cursor: pointer;
+}
+
+.kos-xdesktop__retry:hover {
+  background: var(--kos-hover);
+}
+
+.kos-xdesktop__retry:focus-visible {
+  outline: var(--kos-focus-outline);
+  outline-offset: 1px;
+}

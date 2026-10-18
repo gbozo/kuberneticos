@@ -20,7 +20,7 @@
 manager written in React and mimics/acts like a real desktop — the resemblance to
 Microsoft Windows is deliberate. The goal is to give users a familiar environment
 in which to explore and manage a Kubernetes cluster. Windows, macOS, GNOME and KDE
-themes are on the roadmap.
+themes are included.
     <br>
 </p>
 
@@ -51,6 +51,8 @@ Shipped:
   label selector), pod logs and live metrics. Cluster Explorer lists the
   configured clusters; the Task Manager drives the workload, performance,
   services, pods, namespaces and nodes pages.
+- Four desktop **themes** (Windows default, macOS, GNOME, KDE) implemented as
+  design-token overrides, switchable from the start menu footer.
 
 Live CPU/memory metrics require
 [metrics-server](https://github.com/kubernetes-sigs/metrics-server) in the
@@ -80,7 +82,7 @@ and AI agents in [`agents.md`](agents.md).
 | `src/` | The frontend: TypeScript + React 19 + Vite. Shell components, state model, window apps. |
 | `src/state/` | Immutable `DesktopState` reducer + typed event bus. |
 | `src/components/ui/` | Small local UI kit (buttons, menus, toggles, icons) that replaced the abandoned `react-uwp`. |
-| `src/window-apps/` | Pluggable window applications (TestWindow, ClusterExplorer, TaskManager). |
+| `src/window-apps/` | Pluggable window applications (TestWindow — dev-only, ClusterExplorer, TaskManager). |
 | `src/theme/` | Design tokens + the Windows/macOS/GNOME/KDE theme slots. |
 | `src/cluster/` | The one typed cluster-client interface. |
 | `server/` | Go JSON API backed by [`k8s.io/client-go`](https://github.com/kubernetes/client-go). |
@@ -114,6 +116,25 @@ go run .             # listens on :8700, CORS-restricted JSON API
 Without cluster configuration the server still starts and answers with
 `"source":"offline"` and empty lists, so the web desktop runs either way. See
 [`server/README.md`](server/README.md) for endpoints and environment variables.
+
+### Remote apps & Terminal (X-Desktop)
+
+Cluster Explorer can open live sessions into **windows on the desktop**:
+**Terminal** is a `kubectl exec` shell via websocket into xterm.js (*Open
+terminal*), and pods annotated `kos.dev/x-app: "firefox …"` get an *Open GUI
+app* button that renders the app over noVNC. Both ride a single **central shared
+X server pod** (`kos-xserver`): app pods stay stock, each kOS window claims one
+virtual Xvfb display from its pool.
+
+Deploy the X server from [`deploy/`](deploy/) — build the image
+(`docker build -t kos-xserver deploy/xserver`) and apply the manifests
+(`kubectl apply -f deploy/`: StatefulSet + RBAC). The server then allocates
+sessions from a static display pool (`KOS_XDISPLAY_START` first display, default
+`:21`; `KOS_XDISPLAY_POOL` size, default `5`) and bridges the RFB/exec
+websockets. **Without `kos-xserver` nothing crashes**: a session request shows a
+status overlay with a *Retry* button, and windows opened without a pod target
+show an explicit empty state. See [`server/README.md`](server/README.md) and
+[`xdesktop-plan.md`](xdesktop-plan.md).
 
 ### Production build
 

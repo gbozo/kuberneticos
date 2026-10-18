@@ -3,9 +3,11 @@ import { getWindowApp } from '../window-apps/registry';
 import { Window } from './Window';
 
 export function WindowApp({ window: windowState }: { window: WindowState }) {
-  if (windowState.minimized) return null;
-
   const app = getWindowApp(windowState.appId);
+
+  // keepAlive apps (live exec/X sessions) must not unmount when minimized —
+  // Window renders them hidden instead.
+  if (windowState.minimized && !(app?.keepAlive ?? false)) return null;
 
   if (!app) {
     return (

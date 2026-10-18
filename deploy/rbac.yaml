@@ -1,0 +1,55 @@
+# RBAC for the kos-server Go backend (xdesktop support).
+#
+# Scope: cluster-scoped (ClusterRole + ClusterRoleBinding) — by design the
+# terminal (pods/exec) and the xdesktop launch paths target pods in ANY
+# namespace, so a namespaced Role bound to `kos` would make everything
+# beyond the kos namespace 403. Cluster-wide pod access is the intent; trim
+# per environment if your tenancy model differs. Bound to the ServiceAccount
+# `kos-server` (must match the SA actually used by the deployed kos-server
+# workload — if yours differs, align `metadata.name` and `subjects[]`).
+#
+# kos-server uses these verbs for the xdesktop design (xdesktop-plan.md §2/§3):
+#
+#   pods (get/list/watch)      — locate target pod IP + readiness for sessions
+#                                and the /api/xdisplay/health endpoint
+#   pods/exec (create)         — Terminal (remotecommand) + exec-launch of GUI
+#                                apps with DISPLAY/XAUTHORITY injected
+#   deployments (patch)        — RestartDeployment (rolling restart), reused
+#                                by managed-mode session rollouts (M2+, opt-in)
+#
+# Note: no Secrets rule — per-display xauth cookies are minted in kos-server
+# memory and delivered over exec stdin; the server never creates Secrets.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kos-server
+  namespace: kos
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kos-server
+rules:
+  - apiGroups: ['']
+    resources: ['pods']
+    verbs: ['get', 'list', 'watch']
+  - apiGroups: ['']
+    resources: ['pods/exec']
+    verbs: ['create']
+  - apiGroups: ['apps']
+    resources: ['deployments']
+    verbs: ['patch']
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kos-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kos-server
+subjects:
+  - kind: ServiceAccount
+    name: kos-server
+    namespace: kos

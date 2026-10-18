@@ -1,0 +1,159 @@
+# kos-xserver — central shared X server pod for the kOS web desktop
+# (xdesktop-plan.md §2).
+#
+# Design:
+#   * One Xvfb virtual display per kOS window (:21, :22, ... :25 in the
+#     default pool). Apps run in their own pods as REMOTE X CLIENTS:
+#     DISPLAY=kos-xserver.kos:21 over X11 TCP (X display N listens on
+#     6000+N; kos-server and app pods dial them).
+#   * x11vnc (-rfbport 5900+N) per display for the streaming leg; kos-server
+#     bridges RFB TCP <-> browser WebSocket (noVNC side). The 5921..5930 VNC
+#     range is optional pod-local debugging, hence declared on the Service.
+#   * openbox per display for window decorations.
+#
+# Port declarations:
+#   The server env (KOS_XDISPLAY_COUNT=5) runs displays :21..:25, but this
+#   manifest declares ports for :21..:30 — five ports of headroom for
+#   growing KOS_XDISPLAY_COUNT without a manifest change. If you raise the
+#   pool past :30, extend the X (6021..) and VNC (5921..) port lists on BOTH
+#   the StatefulSet and the Service in lockstep.
+#
+# Auth model (single-user instance):
+#   * X11-over-TCP in-cluster is PLAINTEXT by design; authentication is
+#     enforced with per-display MIT-MAGIC-COOKIE-1 xauth cookies (minted by
+#     kos-server, delivered over exec stdin) — never xhost, never a VNC
+#     password (x11vnc runs -nopw).
+#   * The BROWSER leg is always TLS/WSS through kos-server; browsers never
+#     connect to these ports directly.
+#   * Restrict pod traffic with a NetworkPolicy if the cluster is shared.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kos
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kos-xserver
+  namespace: kos
+  labels:
+    app.kubernetes.io/name: kos-xserver
+    app.kubernetes.io/part-of: kuberneticos
+  annotations:
+    kos.dev/design: 'central shared X server pod; one Xvfb+x11vnc+openbox stack per display (:21..:25 default pool, :21..:30 ports declared)'
+    kos.dev/auth: 'X11 plaintext in-cluster; MIT-MAGIC-COOKIE-1 xauth cookies per display; browser leg TLS via kos-server'
+spec:
+  serviceName: kos-xserver
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kos-xserver
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kos-xserver
+        app.kubernetes.io/part-of: kuberneticos
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: xserver
+          # build via deploy/xserver/Dockerfile
+          image: ghcr.io/gbozo/kos-xserver:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: XDISPLAY_START
+              value: '21'
+            - name: XDISPLAY_COUNT
+              value: '5'
+            - name: XDISPLAY_SIZE
+              value: '1920x1080x24'
+          # Displays :21..:30: X on 6021..6030 (6000+N), VNC on 5921..5930.
+          # Headroom for raising KOS_XDISPLAY_COUNT — see the header comment.
+          ports:
+            - { name: 'x-21', containerPort: 6021, protocol: TCP }
+            - { name: 'x-22', containerPort: 6022, protocol: TCP }
+            - { name: 'x-23', containerPort: 6023, protocol: TCP }
+            - { name: 'x-24', containerPort: 6024, protocol: TCP }
+            - { name: 'x-25', containerPort: 6025, protocol: TCP }
+            - { name: 'x-26', containerPort: 6026, protocol: TCP }
+            - { name: 'x-27', containerPort: 6027, protocol: TCP }
+            - { name: 'x-28', containerPort: 6028, protocol: TCP }
+            - { name: 'x-29', containerPort: 6029, protocol: TCP }
+            - { name: 'x-30', containerPort: 6030, protocol: TCP }
+            - { name: 'vnc-21', containerPort: 5921, protocol: TCP }
+            - { name: 'vnc-22', containerPort: 5922, protocol: TCP }
+            - { name: 'vnc-23', containerPort: 5923, protocol: TCP }
+            - { name: 'vnc-24', containerPort: 5924, protocol: TCP }
+            - { name: 'vnc-25', containerPort: 5925, protocol: TCP }
+            - { name: 'vnc-26', containerPort: 5926, protocol: TCP }
+            - { name: 'vnc-27', containerPort: 5927, protocol: TCP }
+            - { name: 'vnc-28', containerPort: 5928, protocol: TCP }
+            - { name: 'vnc-29', containerPort: 5929, protocol: TCP }
+            - { name: 'vnc-30', containerPort: 5930, protocol: TCP }
+          # Probes watch the first display's VNC port (5921): a live probe
+          # means x11vnc is up and the display loop is serving.
+          readinessProbe:
+            tcpSocket:
+              port: 5921
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 5921
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: '2'
+              memory: 4Gi
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kos-xserver
+  namespace: kos
+  labels:
+    app.kubernetes.io/name: kos-xserver
+    app.kubernetes.io/part-of: kuberneticos
+  annotations:
+    kos.dev/notes: 'ClusterIP (NOT headless): app pods use the stable service DNS name; only the X11 port range (6021-6030) is strictly needed by app pods, VNC (5921-5930) is for debugging.'
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: kos-xserver
+  ports:
+    - { name: 'x-21', port: 6021, targetPort: 6021, protocol: TCP }
+    - { name: 'x-22', port: 6022, targetPort: 6022, protocol: TCP }
+    - { name: 'x-23', port: 6023, targetPort: 6023, protocol: TCP }
+    - { name: 'x-24', port: 6024, targetPort: 6024, protocol: TCP }
+    - { name: 'x-25', port: 6025, targetPort: 6025, protocol: TCP }
+    - { name: 'x-26', port: 6026, targetPort: 6026, protocol: TCP }
+    - { name: 'x-27', port: 6027, targetPort: 6027, protocol: TCP }
+    - { name: 'x-28', port: 6028, targetPort: 6028, protocol: TCP }
+    - { name: 'x-29', port: 6029, targetPort: 6029, protocol: TCP }
+    - { name: 'x-30', port: 6030, targetPort: 6030, protocol: TCP }
+    - { name: 'vnc-21', port: 5921, targetPort: 5921, protocol: TCP }
+    - { name: 'vnc-22', port: 5922, targetPort: 5922, protocol: TCP }
+    - { name: 'vnc-23', port: 5923, targetPort: 5923, protocol: TCP }
+    - { name: 'vnc-24', port: 5924, targetPort: 5924, protocol: TCP }
+    - { name: 'vnc-25', port: 5925, targetPort: 5925, protocol: TCP }
+    - { name: 'vnc-26', port: 5926, targetPort: 5926, protocol: TCP }
+    - { name: 'vnc-27', port: 5927, targetPort: 5927, protocol: TCP }
+    - { name: 'vnc-28', port: 5928, targetPort: 5928, protocol: TCP }
+    - { name: 'vnc-29', port: 5929, targetPort: 5929, protocol: TCP }
+    - { name: 'vnc-30', port: 5930, targetPort: 5930, protocol: TCP }

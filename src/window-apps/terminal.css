@@ -1,0 +1,61 @@
+/* Terminal — exec session rendered with xterm.js inside the window client area. */
+
+/* Cancel .kos-window__body padding so the terminal spans the full client area
+   edge-to-edge. Keep in sync with window.css (12px padding). */
+.kos-terminal {
+  position: relative;
+  margin: -12px;
+  height: calc(100% + 24px);
+  overflow: hidden;
+  background: var(--kos-desktop-bg);
+}
+
+.kos-terminal__host {
+  position: absolute;
+  inset: 0;
+  padding: 8px;
+}
+
+/* Status overlay — shown while connecting/errored, hidden when live. */
+.kos-terminal__status {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  text-align: center;
+  background: var(--kos-desktop-bg);
+  color: var(--kos-taskbar-fg);
+  font-family: var(--kos-font-family);
+  font-size: 13px;
+  z-index: 1;
+}
+
+.kos-terminal__status[data-kind='error'] > .kos-terminal__status-icon {
+  color: var(--kos-accent);
+}
+
+.kos-terminal__retry {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: 1px solid var(--kos-input-border);
+  border-radius: 2px;
+  background: var(--kos-input-bg);
+  color: var(--kos-taskbar-fg);
+  font: inherit;
+  cursor: pointer;
+}
+
+.kos-terminal__retry:hover {
+  background: var(--kos-hover);
+}
+
+.kos-terminal__retry:focus-visible {
+  outline: var(--kos-focus-outline);
+  outline-offset: 1px;
+}

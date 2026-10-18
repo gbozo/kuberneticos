@@ -31,12 +31,12 @@ test.describe('KuberneticOS desktop shell', () => {
     // The start menu sits above (does not overlap) the taskbar.
     expect(menuBox!.y + menuBox!.height).toBeLessThanOrEqual(taskbarBox!.y + 2);
 
-    await menu.getByRole('button', { name: 'Test Window' }).click();
+    await menu.getByRole('button', { name: 'Cluster Explorer' }).click();
     await expect(menu).toHaveCount(0);
 
     const window = page.locator('.kos-window');
     await expect(window).toHaveCount(1);
-    await expect(window.locator('.kos-window__title')).toHaveText('Test Window');
+    await expect(window.locator('.kos-window__title')).toHaveText('Cluster Explorer');
   });
 
   test('closes a window with its title-bar close control', async ({ page }) => {

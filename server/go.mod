@@ -5,10 +5,16 @@ go 1.26.0
 toolchain go1.26.9
 
 require (
+	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	k8s.io/api v0.37.1
 	k8s.io/apimachinery v0.37.1
 	k8s.io/client-go v0.37.1
 	k8s.io/metrics v0.37.1
+)
+
+require (
+	github.com/moby/spdystream v0.5.1 // indirect
+	k8s.io/streaming v0.37.1 // indirect
 )
 
 require (

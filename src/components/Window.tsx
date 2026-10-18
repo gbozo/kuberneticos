@@ -16,9 +16,11 @@ export interface WindowProps {
 export function Window({ window: windowState, children }: WindowProps) {
   const { dispatch } = useDesktop();
 
-  if (windowState.minimized) return null;
-
   const app = getWindowApp(windowState.appId);
+  const keepAlive = app?.keepAlive ?? false;
+  const hidden = windowState.minimized && keepAlive;
+  if (windowState.minimized && !keepAlive) return null;
+
   const iconName = app?.icon ?? 'folder';
 
   const maximized = windowState.maximized;
@@ -32,7 +34,11 @@ export function Window({ window: windowState, children }: WindowProps) {
   return (
     <Rnd
       className={windowState.focused ? 'kos-window is-focused' : 'kos-window is-blurred'}
-      style={{ zIndex: windowState.zIndex }}
+      style={{
+        zIndex: windowState.zIndex,
+        // Minimized keepAlive windows stay mounted but out of layout.
+        ...(hidden ? { display: 'none' } : {}),
+      }}
       size={{ width, height }}
       position={{ x, y }}
       minWidth={250}

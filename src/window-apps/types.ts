@@ -11,4 +11,10 @@ export interface WindowAppDefinition {
   title: string;
   icon: KosIconName;
   component: ComponentType<WindowAppProps>;
+  /**
+   * Apps holding live remote connections (exec websockets, X display sessions)
+   * set this so a minimized window stays mounted (hidden with display:none)
+   * instead of unmounting its React tree and tearing the session down.
+   */
+  keepAlive?: boolean;
 }

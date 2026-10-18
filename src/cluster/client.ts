@@ -19,6 +19,7 @@ export interface PodInfo {
   ownerKind?: string; // 'ReplicaSet' | 'ReplicationController' | 'StatefulSet' | ...
   ownerName?: string;
   readonly labels?: Readonly<Record<string, string>>;
+  readonly annotations?: Readonly<Record<string, string>>;
 }
 
 export interface NamespaceInfo {

@@ -33,6 +33,13 @@ go run .
 | `KUBERNETICOS_KUBECONFIG` | — | Explicit kubeconfig path (takes precedence over `KUBECONFIG`) |
 | `KUBECONFIG` | — | Standard kubeconfig path, used if `KUBERNETICOS_KUBECONFIG` is unset |
 | `KOS_ALLOWED_ORIGINS` | Vite dev + preview origins | Comma-separated exact CORS origins; set it to **replace** the defaults |
+| `KOS_XDISPLAY_START` | `21` | First Xvfb display number handed out by the display allocator |
+| `KOS_XDISPLAY_POOL` | `5` | Number of displays in the static pool (`:START` … `:START+N-1`) |
+| `KOS_XDISPLAY_TTL` | `12h` | Lifetime of an xdisplay session token (modifiable reconnects/`DELETE` semantics unchanged) |
+| `KOS_XSERVER_NAMESPACE` | `kos` | Namespace of the central shared X server pod |
+| `KOS_XSERVER_POD` | `kos-xserver-0` | X server pod name (xauth exec target, pod IP for VNC dials) |
+| `KOS_XSERVER_SERVICE` | `kos-xserver` | X server service name (DISPLAY FQDN `<svc>.<ns>.svc`) |
+| `KOS_STREAM_IDLE_TIMEOUT` | `5m` | Idle budget for the websocket streams (xdisplay ws, exec ws) |
 
 ## Endpoints
 
@@ -61,6 +68,12 @@ All responses are JSON. CORS is **origin-restricted**: an allowlist (defaults to
 | `GET` | `/api/services?cluster=<id>&namespace=<ns>` | `{"source":...,"services":[Service...]}` |
 | `GET` | `/api/metrics/nodes?cluster=<id>` | `{"source":...,"available":<bool>,"nodes":[NodeMetrics...]}` |
 | `GET` | `/api/metrics/pods?cluster=<id>&namespace=<ns>` | `{"source":...,"available":<bool>,"pods":[PodMetrics...]}` |
+| `POST` | `/api/xdisplay` | Allocate an X display + launch a GUI app: body `{namespace, pod, container?, app?, command[:]}` → `{"source":...,"display":<n>,"token":"...","wsPath":"/api/xdisplay/ws?token=..."}` |
+| `DELETE` | `/api/xdisplay?token=<t>` or `?display=<n>` | Kill the launched app process, clean the cookie and free the display → `{"source":...,"ok":true,"message":...}` |
+| `GET` | `/api/xdisplay/list` | `{"source":...,"available":<bool>,"displays":[{display,app,pod,namespace,container,createdAt,sessionAge}]}` |
+| `GET` | `/api/xdisplay/health` | `{"source":...,"available":<bool>}` — xserver pod reachable and its first VNC port answers TCP |
+| `GET` | `/api/xdisplay/ws?token=<t>` | **WebSocket** — binary RFB frames proxied to the display's `5900+N` x11vnc listener (websockify clone) |
+| `GET` | `/api/exec/ws?namespace=<ns>&pod=<p>&container=<c>` | **WebSocket** — terminal exec bridge: binary = data, text `{"type":"resize","cols":N,"rows":N}` = resize, text `{"type":"error"\|"closed"}` = lifecycle |
 
 Every response includes a `source` field (`"live"` or `"offline"`). All query
 parameters are optional unless noted; empty lists render as `[]`, never `null`.
@@ -85,14 +98,23 @@ offline mode `503`; all other errors return `500`. Every request is wrapped by
 the `withRequestTimeout` middleware: unless the caller already set a deadline,
 the server gives it a shared **15s context budget** and a deadline-exceeded
 error (e.g. from the cluster client or a stuck kubelet) is answered with
-`504` `{"error":"context deadline exceeded"}`. Unknown methods on a known
-path return `405`; `OPTIONS` preflight from an allowed origin is answered by the
-CORS middleware with `204`. `withCORS` allows `GET, POST, DELETE, OPTIONS` and
-sets `Vary: Origin` on every response. Requests may carry an `Origin` in the
-allowlist (echoed exactly), no `Origin` (curl, server-to-server — always
-allowed), or a disallowed `Origin`: the latter get no ACAO header, so `GET` still
-runs but the browser blocks reading it, while `POST`/`DELETE` and `OPTIONS` are
-rejected with `403` `{"error":"origin not allowed"}` before the handler runs.
+`504` `{"error":"context deadline exceeded"}`. The two websocket routes are the
+deliberate exception to that budget (bipartite timeout strategy): they derive a
+cancel-detached context for the long-lived cluster leg and enforce liveness
+themselves — 10s ping/pong keepalive, an idle timeout (`KOS_STREAM_IDLE_TIMEOUT`,
+default `5m`, reset by pong traffic), and the request middleware never sees
+their lifetime. WebSocket origin handling mirrors the HTTP allowlist at the
+upgrade (`withCORS` passes GETs through, so the upgrader's `CheckOrigin`
+enforces it): no `Origin` header (curl/server-to-server) is allowed, browser
+origins must be allowlisted, everything else gets a non-2xx handshake. Unknown
+methods on a known path return `405`; `OPTIONS` preflight from an allowed
+origin is answered by the CORS middleware with `204`. `withCORS` allows `GET,
+POST, DELETE, OPTIONS` and sets `Vary: Origin` on every response. Requests may
+carry an `Origin` in the allowlist (echoed exactly), no `Origin` (curl,
+server-to-server — always allowed), or a disallowed `Origin`: the latter get no
+ACAO header, so `GET` still runs but the browser blocks reading it, while
+`POST`/`DELETE` and `OPTIONS` are rejected with `403`
+`{"error":"origin not allowed"}` before the handler runs.
 
 The three write endpoints mutate the cluster:
 
@@ -103,6 +125,26 @@ The three write endpoints mutate the cluster:
 | `POST` | `/api/deployments/scale?cluster=<id>&namespace=<ns>&deployment=<name>&replicas=<n>` | `200` `{"source":…,"ok":true,"message":"Scaled deployment <ns>/<name> to <n> replicas"}` |
 
 Offline mode rejects them with `503` (`errOffline`) instead of mutating anything.
+
+### X-display sessions (xdesktop, M2)
+
+`POST /api/xdisplay` allocates a display from the static pool (`:21`–`:25` by
+default, `KOS_XDISPLAY_START`/`KOS_XDISPLAY_POOL`), generates a 16-byte xauth
+cookie, registers it in the xserver pod via `POST .../pods/exec` (`xauth add`),
+then launches the requested command inside the **user-supplied target pod**:
+the cookie travels on the exec's **stdin** (base64), a wrapper script decodes
+it into `/tmp/.kos-xauth-<N>` via `xauth -f`, prints the launcher shell PID and
+`exec`s the command with `DISPLAY=kos-xserver.<ns>.svc:<N>` and
+`XAUTHORITY=/tmp/.kos-xauth-<N>` set. The session is looked up afterwards via
+its random **token** (32 hex chars): it survives browser refreshes until
+`DELETE` or the TTL (`KOS_XDISPLAY_TTL`, default `12h`) and may open multiple
+websocket streams — `GET /api/xdisplay/ws?token=...` proxies binary frames
+between the browser and `podIP:5900+N` (x11vnc). `DELETE` (by `token=` or
+`display=`) execs `kill -TERM <pid>` in the app pod, best-effort removes the
+cookie file and xauth entries and frees the display; unknown/expired tokens
+answer `404`. `list`/`health` follow the metrics philosophy: HTTP 200 with
+`available:false` when offline or the xserver is unreachable — never a 5xx.
+`POST /api/xdisplay` on an exhausted pool answers `503`.
 
 The two metrics endpoints are the exception to the error mapping: they read
 CPU/memory from `metrics.k8s.io/v1beta1` (via the

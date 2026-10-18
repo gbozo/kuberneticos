@@ -14,6 +14,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	urlpkg "net/url"
 	"os"
 	"os/signal"
 	"sort"
@@ -61,6 +62,9 @@ const (
 	// maxScaleReplicas bounds the scale action so a typo cannot ask for an absurd
 	// number of pods. Kubernetes itself has no such limit.
 	maxScaleReplicas = 1000
+
+	// maxK8sNameLength is the RFC 1123 DNS label limit enforced by isK8sName.
+	maxK8sNameLength = 63
 )
 
 // errOffline is returned by offlineClient for actions that require a cluster.
@@ -83,13 +87,14 @@ type Node struct {
 
 // Pod is the API-facing view of a Kubernetes pod.
 type Pod struct {
-	Name      string            `json:"name"`
-	Namespace string            `json:"namespace"`
-	Node      string            `json:"node"`
-	Phase     string            `json:"phase"`
-	OwnerKind string            `json:"ownerKind,omitempty"`
-	OwnerName string            `json:"ownerName,omitempty"`
-	Labels    map[string]string `json:"labels,omitempty"`
+	Name        string            `json:"name"`
+	Namespace   string            `json:"namespace"`
+	Node        string            `json:"node"`
+	Phase       string            `json:"phase"`
+	OwnerKind   string            `json:"ownerKind,omitempty"`
+	OwnerName   string            `json:"ownerName,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty"`
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 // Replicas is the API-facing view of a workload's replica counts.
@@ -368,13 +373,14 @@ func (c *liveClient) ListPods(ctx context.Context, _, node, namespace, selector 
 		p := &list.Items[i]
 		ownerKind, ownerName := controllerOwner(p.OwnerReferences)
 		pods = append(pods, Pod{
-			Name:      p.Name,
-			Namespace: p.Namespace,
-			Node:      p.Spec.NodeName,
-			Phase:     string(p.Status.Phase),
-			OwnerKind: ownerKind,
-			OwnerName: ownerName,
-			Labels:    p.Labels,
+			Name:        p.Name,
+			Namespace:   p.Namespace,
+			Node:        p.Spec.NodeName,
+			Phase:       string(p.Status.Phase),
+			OwnerKind:   ownerKind,
+			OwnerName:   ownerName,
+			Labels:      p.Labels,
+			Annotations: p.Annotations,
 		})
 	}
 	return pods, nil
@@ -1028,10 +1034,17 @@ type actionResponse struct {
 	Message string `json:"message,omitempty"`
 }
 
-// api holds the dependencies shared by all handlers.
+// api holds the dependencies shared by all handlers. clientset and
+// restConfig are the raw client-go seam for the exec/websocket routes
+// (xdisplay.go, exec.go); both are nil in offline mode, where those routes
+// answer 503 like the other write endpoints. xdisplay is the display
+// pool allocator (static, in-memory).
 type api struct {
-	client ClusterClient
-	source string
+	client     ClusterClient
+	source     string
+	clientset  kubernetes.Interface
+	restConfig *rest.Config
+	xdisplay   *xDisplayAllocator
 }
 
 func (a *api) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -1299,6 +1312,12 @@ func newMux(a *api) *http.ServeMux {
 	mux.HandleFunc("GET /api/replicasets", a.handleReplicaSets)
 	mux.HandleFunc("GET /api/replicationcontrollers", a.handleReplicationControllers)
 	mux.HandleFunc("GET /api/services", a.handleServices)
+	mux.HandleFunc("POST /api/xdisplay", a.handleXDisplayCreate)
+	mux.HandleFunc("DELETE /api/xdisplay", a.handleXDisplayDelete)
+	mux.HandleFunc("GET /api/xdisplay/list", a.handleXDisplayList)
+	mux.HandleFunc("GET /api/xdisplay/health", a.handleXDisplayHealth)
+	mux.HandleFunc("GET /api/xdisplay/ws", a.handleXDisplayWS)
+	mux.HandleFunc("GET /api/exec/ws", a.handleExecWS)
 	return mux
 }
 
@@ -1416,12 +1435,61 @@ func withCORS(next http.Handler) http.Handler {
 	})
 }
 
-// withLogging emits one minimal line per request to stderr.
+// isK8sName reports whether name is a valid RFC 1123 DNS label — the naming
+// constraint shared by namespaces, pods and containers, i.e. every field this
+// server interpolates into exec/REST paths. Returns false for empty input.
+func isK8sName(name string) bool {
+	if len(name) == 0 || len(name) > maxK8sNameLength {
+		return false
+	}
+	if name[0] == '-' || name[len(name)-1] == '-' {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		alnum := (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+		if !alnum && c != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+// redactRequestURI returns uri with the value of every query parameter
+// named "token" replaced by [redacted]. Request URIs sometimes carry
+// bearer-like query params (the xdisplay websocket path) and must never
+// reach the access log verbatim; anything that fails to parse is returned
+// unchanged (the logging middleware then logs the raw URI — still safer
+// than guessing at malformed input).
+func redactRequestURI(uri string) string {
+	idx := strings.IndexByte(uri, '?')
+	if idx < 0 {
+		return uri
+	}
+	values, err := urlpkg.ParseQuery(uri[idx+1:])
+	if err != nil {
+		return uri
+	}
+	redacted := false
+	for key := range values {
+		if strings.EqualFold(key, "token") {
+			values[key] = []string{"[redacted]"}
+			redacted = true
+		}
+	}
+	if !redacted {
+		return uri
+	}
+	return uri[:idx] + "?" + values.Encode()
+}
+
+// withLogging emits one minimal line per request to stderr, with bearer-like
+// query parameters scrubbed (see redactRequestURI).
 func withLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		next.ServeHTTP(w, r)
-		log.Printf("%s %s %s", r.Method, r.URL.RequestURI(), time.Since(start).Round(time.Millisecond))
+		log.Printf("%s %s %s", r.Method, redactRequestURI(r.URL.RequestURI()), time.Since(start).Round(time.Millisecond))
 	})
 }
 
@@ -1475,19 +1543,20 @@ func kubeContextName(path string) string {
 	return raw.CurrentContext
 }
 
-// buildClient returns a live cluster client when configuration is available and
-// an offline client otherwise. It never fails.
-func buildClient() (ClusterClient, string) {
+// buildClient returns a live cluster client (plus the raw client-go seams
+// the exec/websocket routes need) when configuration is available, an
+// offline client otherwise. It never fails.
+func buildClient() (ClusterClient, kubernetes.Interface, *rest.Config, string) {
 	setup, err := loadKubeSetup()
 	if err != nil {
 		log.Printf("kubernetes unavailable, serving offline: %v", err)
-		return offlineClient{}, offlineSource
+		return offlineClient{}, nil, nil, offlineSource
 	}
 
 	clientset, err := kubernetes.NewForConfig(setup.cfg)
 	if err != nil {
 		log.Printf("kubernetes client init failed, serving offline: %v", err)
-		return offlineClient{}, offlineSource
+		return offlineClient{}, nil, nil, offlineSource
 	}
 
 	// A nil metrics client means "metrics-server not installed"; the metrics
@@ -1503,7 +1572,7 @@ func buildClient() (ClusterClient, string) {
 		clusterID:   setup.name,
 		clusterName: setup.name,
 		server:      setup.cfg.Host,
-	}, liveSource
+	}, clientset, setup.cfg, liveSource
 }
 
 func main() {
@@ -1515,8 +1584,15 @@ func main() {
 		port = defaultPort
 	}
 
-	client, source := buildClient()
-	handler := withLogging(withCORS(withRequestTimeout(requestTimeout)(newMux(&api{client: client, source: source}))))
+	client, clientset, restConfig, source := buildClient()
+	xdisplay := newXDisplayAllocator()
+	handler := withLogging(withCORS(withRequestTimeout(requestTimeout)(newMux(&api{
+		client:     client,
+		source:     source,
+		clientset:  clientset,
+		restConfig: restConfig,
+		xdisplay:   xdisplay,
+	}))))
 
 	srv := &http.Server{
 		Addr:              ":" + port,
@@ -1526,6 +1602,10 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Session reaper rides the shutdown-cancelling context, so a signal
+	// tears both the listener and the sweeper goroutine down.
+	go newXDisplaySweeper(restConfig, xdisplay, newXServerCoord()).run(ctx)
 
 	go func() {
 		log.Printf("kuberneticos server listening on :%s (source=%s)", port, source)

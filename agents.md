@@ -26,18 +26,21 @@ preserved.
 | `src/components/` | Desktop shell (`Window`, `WindowApp`, `WindowManager`, `TaskBar`, `TaskBarWindows`, `TaskBarClock`, `StartMenu`, `Contextmenu`) + one CSS file each | Keep the desktop metaphor (rule 2). |
 | `src/components/ui/` | Local UI primitives that replaced `react-uwp` (`AppBarButton`, `Menu`, `Toggle`, `Icon`, `Tooltip`, `ListView`, …) + `ui.css` | Reuse these; do **not** add a UI-kit dependency. |
 | `src/theme/` | `tokens.css` design tokens + per-theme overrides, `theme.ts` (apply/persist) | All colours and sizes go through `--kos-*` tokens. |
-| `src/window-apps/` | Pluggable window "apps" (`TestWindow`, `ClusterExplorer`, `TaskManager`) and `registry.ts` | Register new apps in the registry. |
+| `src/window-apps/` | Pluggable window "apps" (`TestWindow` — dev-only, `ClusterExplorer`, `Terminal`, `XDesktop`, `TaskManager`) and `registry.ts` | Register new apps in the registry. |
 | `src/cluster/client.ts` | **The one** cluster integration point: the `ClusterClient` interface, `HttpClusterClient`, `OfflineClusterClient` | No `fetch` outside this file (rule 1). |
 | `src/assets/` | Logos and wallpapers | Keep; prefer SVG, compress raster assets. |
 | `server/` | Go API server (`k8s.io/client-go`) serving JSON under `/api` | See `server/README.md`. |
+| `deploy/` | Kubernetes manifests for the central **kos-xserver** pod (StatefulSet + Service + RBAC, `xserver/` Dockerfile + entrypoint) — the shared X server behind the `XDesktop` window app | Keep in sync with `xdesktop-plan.md` (display pool `:21`+, xauth-per-display); rebuild the xserver image from `deploy/xserver/Dockerfile`. |
 | `e2e/` | Playwright specs | The desktop behaviour contract is asserted here. |
 | `README.md`, `spec.md`, `agents.md` | Docs | Keep them truthful when you change behaviour. |
 
 ## Hard rules for agents
 
-1. **`fetch` lives only in `src/cluster/client.ts`.** Components and window apps
-   call the typed `ClusterClient` interface (`clusterClient`); never add ad-hoc
-   `fetch` calls elsewhere.
+1. **`fetch` lives only in `src/cluster/client.ts` and `src/cluster/streams.ts`.**
+   Components and window apps call the typed `ClusterClient` interface
+   (`clusterClient`) or the stream helpers (`openXDisplaySession`,
+   `connectRfbStream`, `connectExecStream`); never add ad-hoc `fetch` or raw
+   WebSocket calls elsewhere.
 2. **Preserve the desktop metaphor**: taskbar fixed at the bottom, z-index
    layering (taskbar above windows), focus/blur window states, minimize/restore
    distinct from close, start menu opening above the taskbar, right-click
@@ -108,3 +111,8 @@ server"* in Cluster Explorer and Task Manager.
   `govulncheck` clean — do not downgrade it.
 - `_config.yml` (jekyll-theme-architect) is a leftover kept deliberately; it is
   not part of the build.
+- `XDesktop`/`Terminal` session traffic (`src/cluster/streams.ts`) is
+  deliberately **long-lived**: the 15s request budget does not apply to the RFB
+  and exec websockets — their liveness is enforced server-side by ping/pong
+  keepalive and the idle timeout (`KOS_STREAM_IDLE_TIMEOUT`). Do not wrap these
+  streams in a request timeout.

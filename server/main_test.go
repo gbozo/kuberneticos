@@ -1225,3 +1225,71 @@ func TestCORS_EnvReplaceSemantics(t *testing.T) {
 		t.Fatalf("ACAO mismatch")
 	}
 }
+
+// TestRedactRequestURI pins the access-log scrub: the value of any query
+// parameter named "token" (the xdisplay websocket bearer) must never reach
+// the log line verbatim; URIs without a token param stay byte-identical.
+func TestRedactRequestURI(t *testing.T) {
+	cases := []struct {
+		name string
+		uri  string
+		want string
+	}{
+		{
+			"token scrubbed",
+			"/api/xdisplay/ws?token=abc123",
+			"/api/xdisplay/ws?token=%5Bredacted%5D",
+		},
+		{
+			"token scrubbed among other params",
+			"/api/xdisplay/ws?token=abc123&x=1",
+			"/api/xdisplay/ws?token=%5Bredacted%5D&x=1",
+		},
+		{
+			"no token, unchanged",
+			"/api/pods?namespace=default&pod=p1",
+			"/api/pods?namespace=default&pod=p1",
+		},
+		{
+			"path only, unchanged",
+			"/api/health",
+			"/api/health",
+		},
+		{
+			"case-insensitive key match",
+			"/api/xdisplay/ws?Token=abc123",
+			"/api/xdisplay/ws?Token=%5Bredacted%5D",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := redactRequestURI(tc.uri); got != tc.want {
+				t.Fatalf("redactRequestURI(%q) = %q, want %q", tc.uri, got, tc.want)
+			}
+			if tc.uri == tc.want {
+				return
+			}
+			if strings.Contains(redactRequestURI(tc.uri), "abc123") {
+				t.Fatalf("redaction leaked the token value")
+			}
+		})
+	}
+}
+
+// TestIsK8sName pins the shared RFC 1123 label validator used by every
+// exec/xdisplay path that interpolates names into request URLs.
+func TestIsK8sName(t *testing.T) {
+	valid := []string{"default", "kos-xserver-0", "a", "a-1", "web-2-b", "0123456789"}
+	invalid := []string{"", "-lead", "trail-", "UPPER", "a b", "a_b", "a.b/i", "col:on", "../etc",
+		"0123456789012345678901234567890123456789012345678901234567890123456789"}
+	for _, name := range valid {
+		if !isK8sName(name) {
+			t.Errorf("isK8sName(%q) = false; want true", name)
+		}
+	}
+	for _, name := range invalid {
+		if isK8sName(name) {
+			t.Errorf("isK8sName(%q) = true; want false", name)
+		}
+	}
+}

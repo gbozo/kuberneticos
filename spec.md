@@ -43,8 +43,8 @@ as **themes** (token overrides), not code forks.
 │ Desktop shell (React 19 + Vite, TypeScript)              │
 │  Taskbar ── Clock · StartMenu · WindowList · ContextMenu │
 │  WindowManager ── z-order, focus/blur, minimize/restore  │
-│  Window apps ── registry: TestWindow, ClusterExplorer,   │
-│                  TaskManager                             │
+│  Window apps ── registry: ClusterExplorer, Terminal,       │
+│  XDesktop (keepAlive), TaskManager*(TestWindow=dev-only)   │
 └───────────────┬──────────────────────────────────────────┘
                 │ typed ClusterClient interface                 │
                 │ (no raw fetch outside src/cluster/client.ts) │
@@ -98,8 +98,15 @@ height and restore their stored geometry when un-maximized.
   `Separator`, `Toggle`, `Tooltip` — all local, all token-driven, no UI kit.
 - **Shell** (`src/components/`): `Window`, `WindowApp`, `WindowManager`,
   `TaskBar`, `TaskBarWindows`, `TaskBarClock`, `StartMenu`, `Contextmenu`.
-- **Window apps** (`src/window-apps/`): `TestWindow`, `ClusterExplorer` and
-  `TaskManager`, registered in `registry.ts`. Cluster Explorer lists clusters.
+- **Window apps** (`src/window-apps/`): `TestWindow` (dev-only), `ClusterExplorer`,
+  `Terminal`, `XDesktop` and `TaskManager`, registered in `registry.ts`. Cluster
+  Explorer lists clusters and opens sessions: every pod row offers **Open
+  terminal**, and pods annotated `kos.dev/x-app: "<command>"` additionally get
+  **Open GUI app**. `Terminal` is an xterm.js shell into the pod (exec
+  websocket); `XDesktop` is a remote GUI app rendered over noVNC inside the
+  window. Both apps are `keepAlive`: minimizing keeps the session (React tree
+  stays mounted, hidden with `display:none`) and closing/unmounting is what
+  releases it —-only window close triggers the (best-effort) `DELETE /api/xdisplay` for GUI sessions.
   Task Manager is a Windows 11-style shell: a left icon rail with pages
   Workloads (default), Performance, Services, Pods, Namespaces and Nodes plus a
   Settings page pinned at the rail bottom; a per-page command bar (namespace
@@ -116,8 +123,9 @@ height and restore their stored geometry when un-maximized.
   (capacity, allocatable, conditions and addresses). The pod and deployment
   flyouts include an actions bar (End task for pods; Restart and Scale for
   deployments) that calls the API behind a confirmation dialog and surfaces
-  RBAC errors inline. A single cluster is auto-selected when one exists. Both apps show *"No clusters configured —
-  start the Go server"* when the API returns none.
+  RBAC errors inline. A single cluster is auto-selected when one exists. Both
+  apps show *"No clusters configured — start the Go server"* when the API returns
+  none.
 
 ## 5. Kubernetes integration (as implemented)
 
@@ -163,10 +171,20 @@ interface ClusterClient {
 }
 ```
 
+REST lives in `client.ts` only. **Streams** (`src/cluster/streams.ts`) are the
+second and last network module: `openXDisplaySession` / `releaseXDisplaySession`
+/ `listXDisplays` (JSON calls to `/api/xdisplay*`), `connectRfbStream` (noVNC
+`RFB` wrapper — scaleViewport on, no passwords, xauth does the auth) and
+`connectExecStream` (browser websocket bridge: binary frames are terminal data,
+text frames are JSON control — `{"type":"resize",…}`, `"error"`, `"closed"`).
+Errors surface as `StreamError` with `kind: 'unavailable' | 'timeout' |
+'network' | 'failed'` so the window apps can degrade instead of crashing.
+
 - `ClusterInfo { id, name, server }`, `NamespaceInfo { name, status }`,
   `NodeInfo { name, status, roles, version? }`, `NodeDetailInfo { name, status,
   roles, version, capacity, allocatable, conditions, addresses }`,
-  `PodInfo { name, namespace, node?, phase, ownerKind?, ownerName? }`, plus
+  `PodInfo { name, namespace, node?, phase, ownerKind?, ownerName?,
+  annotations? }`, plus
   `DeploymentInfo`, `ReplicaSetInfo`, `ReplicationControllerInfo` (each with a
   `ReplicaCounts { desired, ready, available, updated }`) and
   `ServiceInfo { name, namespace, type, clusterIP, ports }`. `PodInfo` and
@@ -227,6 +245,17 @@ endpoints answer `{"available":false,"nodes":[]}` / `{"available":false,
 "pods":[]}` with **HTTP 200** — never 500; offline mode also reports
 `available:false`.
 
+Every request is bounded so a hung target can't wedge the app or the server:
+`HttpClusterClient` routes all calls through a **15s fetch timeout**
+(`AbortController` armed through body read) that aborts with a clear timeout
+error, and `usePolledMetrics` carries an **in-flight poll guard** keyed to
+cluster/namespace so polls never overlap and stale responses are discarded when
+the cluster changes. Server-side, a `withRequestTimeout` middleware gives each
+request a **15s budget** (504 on deadline), kubelet Summary-API proxy calls run
+under a **3s deadline** capped by the remaining budget, and per-node summary
+fetches run four-way concurrent — an unresponsive kubelet degrades the metrics
+endpoints instead of blocking the process for minutes.
+
 Kubeconfig resolution order is `KUBERNETICOS_KUBECONFIG` → `KUBECONFIG` →
 in-cluster → `$HOME/.kube/config`. If none is usable the server must still
 start and answer `"source":"offline"` with empty lists — it must never crash.
@@ -235,32 +264,92 @@ CORS uses an origin allowlist (never `*`; see `KOS_ALLOWED_ORIGINS` above), and
 `name` (400 without it); a missing node or pod returns 404. Pod logs default to
 `tailLines=200`, clamped to 1–5000.
 
+### X-Desktop sessions (as implemented)
+
+The remote-app feature rides a **central shared X server pod** (`kos-xserver`,
+deployed from `deploy/` — one `Xvfb :21..:N` + openbox + x11vnc per pool display,
+per-display xauth cookies, memory-backed `/dev/shm`). App pods stay stock:
+kos-server generates a per-session xauth cookie, `xauth add`s it in the xserver
+pod, launches the annotated command in the target pod via exec wrapped in
+`setsid env DISPLAY=kos-xserver.<ns>.svc:<N> … </dev/null >/dev/null 2>&1 & echo
+$!` (backgrounded stdin/stdout — the exec session must NOT live for the app),
+and records the PID. The kOS window claims exactly one virtual display.
+
+Endpoints (`server/xdisplay.go` / `server/exec.go`):
+
+- `POST /api/xdisplay` (`{namespace, pod, container?, command, app?}`) →
+  allocate display, auth+launch, return `{display, token, wsPath}`.
+- `DELETE /api/xdisplay?token=` → kill the recorded process **group**
+  (`kill -TERM -pid` with `kill -0` wait + `kill -KILL` fallback), remove the
+  xauth entries, free the display; release idempotent.
+- `GET /api/xdisplay/list` → active sessions (`{"available",displays:[…]}`);
+  offline → `available:false`, HTTP 200.
+- `GET /api/xdisplay/health` → pod + TCP dial; `available:false`, never 5xx.
+- `GET /api/xdisplay/ws?token=` → websockify-style upgrade: gorilla websocket ⇄
+  `podIP:5900+N` binary proxy, 10s ping/pong, activity-driven idle deadline;
+  token validated per upgrade (reconnectable until TTL/DELETE).
+- `GET /api/exec/ws?…` → terminal: remotecommand WebSocket v5 executor with
+  SPDY fallback; binary = data, text = JSON control (resize via a
+  `terminalSizeQueue`); environment-validated names (`isK8sName`).
+
+Long-lived-session rules: streams use `context.WithoutCancel` — the 15s request
+budget never applies; deadlines are owned by one place (`installWSHandlers`)
+and refreshed by pong handlers and data frames (a terminal must not die at
+`start+idle`); a background **sweeper** (interval injectable) kills process
+groups, removes xauth entries and frees/purges expired sessions and tokens; the
+access log redacts `token=` values.
+
+Deployment (`deploy/`): `kos-xserver` StatefulSet + Service (X ports
+`6000+N`, VNC `5921..5930` = default pool `KOS_XDISPLAY_START`/`KOS_XDISPLAY_POOL`
++ headroom, tcp probes on the first VNC port), snapshot RBAC as
+`ClusterRole`/`ClusterRoleBinding` for SA `kos-server` (pods get/list/watch,
+`pods/exec` create, deployments patch — cookies travel via exec stdin, no
+Secrets). X11-over-TCP inside the cluster is plaintext by design (single-user
+posture, documented); the browser leg is always TLS via kos-server.
+
 ## 6. Testing
 
-- `vitest` (`npm run test`): 114 tests in 5 files — 13 reducer tests (window
+- `vitest` (`npm run test`): 158 tests in 9 files — 13 reducer tests (window
   add/remove/focus, z-order, minimize/restore, maximize, immutability, event
-  bus), 28 cluster-client tests (URL/query construction for every read and write
+  bus), 29 cluster-client tests (URL/query construction for every read and write
   endpoint including the metrics ones, envelope unwrapping, error handling,
-  offline fallback), 32 Task Manager data tests (workload-tree building, owner
-  resolution, metric roll-ups, group-by/sort/filter, series merging), 20
-  `DataTable` tests (sort, tree flatten/expand, heat cells, loading/error/empty
-  states, row activation) and 21 Task Manager hook tests (poll cadence per
-  speed, pause-on-hidden, series dedupe/cap, `localStorage` prefs; several via
-  `it.each`).
-- `playwright` (`npm run e2e`): 10 specs in 2 files — the 3 desktop-shell
+  offline fallback, and the 15s fetch-timeout abort), 25 cluster-stream tests
+  (`/api/xdisplay` session open/release/list envelopes, the binary/text exec
+  websocket protocol, RFB handle lifecycle incl. `rescale`, `StreamError`
+  kinds), 6 `XDesktop` lifecycle tests (mount→session→release, retry, unmount,
+  no-pod-target empty state), 4 Cluster Explorer session-wiring tests
+  (`Open terminal` / annotation-gated `Open GUI app` ADD_WINDOW props), 7
+  `appProps` tests (typed `kos.dev/x-app` command parsing), 32 Task Manager
+  data tests (workload-tree building, owner resolution, metric roll-ups,
+  group-by/sort/filter, series merging), 20 `DataTable` tests (sort, tree
+  flatten/expand, heat cells, loading/error/empty states, row activation) and
+  22 Task Manager hook tests (poll cadence per speed, pause-on-hidden, the
+  no-overlap in-flight poll guard, series dedupe/cap, `localStorage` prefs;
+  several via `it.each`).
+- `playwright` (`npm run e2e`): 14 specs in 3 files — the 3 desktop-shell
   contract specs (taskbar pinned, start menu launches a window, close control)
   plus 7 Task Manager specs (launch on the Workloads page with the cluster
   hero, page navigation with workload-tree expansion, the offline
   empty-cluster message, the workload detail flyout with pod logs, the
   service/node detail flyouts, and the confirm-gated End task/Restart/Scale
   actions including the RBAC-forbidden dialog staying open with the error
-  surfaced inline).
+  surfaced inline) and 4 X-Desktop offline-degradation specs (the no-pod-target
+  empty states of Remote App and Terminal, the close of a degraded window
+  keeping the window manager functional, and a pod GUI session degrading
+  gracefully against an offline server and closing cleanly).
 - Go tests (`cd server && go test ./...`): handler tests over a stub
   `ClusterClient`, offline `[]`-not-`null` assertions, read-path 400/404/500
   mapping, write-action parameter validation (400 for a missing
   namespace/pod/deployment/replicas and the 0/1000 replicas bounds), the
-  `writeError` status map (401/403/404/409/503/500), `nodeStatus`/`nodeRoles`
-  units, and a `client-go` fake-clientset test.
+  `writeError` status map (401/403/404/409/503/500), the request-timeout budget
+  (504) and kubelet-summary deadline math, `nodeStatus`/`nodeRoles` units, and
+  a `client-go` fake-clientset test, plus the X-Desktop suite: display
+  allocator allocate/free/idempotency, launch-script + cookie-stdin contract
+  units, the expiry sweeper (kill + xauth-remove + release) over a fake
+  executor, token redaction in the access log, `isK8sName` URL validation, and
+  real-websocket loopback tests with a fake RFB TCP server (origin
+  denial/allow, pong/data deadline refresh, terminal control-frame eviction,
+  exec error-frame handshake).
 - Gates: `tsc -b`, `eslint .`, `prettier --check .`, `vite build`,
   `go build ./...`, `go vet ./...`, `go test ./...`, `govulncheck ./...` and
   `npm audit` must all stay clean.
@@ -272,6 +361,6 @@ CORS uses an origin allowlist (never `*`; see `KOS_ALLOWED_ORIGINS` above), and
 | D1 | Vendored legacy Go tree | **Deleted.** The archived `github.com/kubernetes-client/go` is superseded by the maintained **`k8s.io/client-go`**, which the server depends on. |
 | D2 | Cluster integration shape | **Go server + typed client (B).** `server/` serves JSON under `/api` via Vite's dev proxy; the app calls it through `HttpClusterClient`. |
 | D3 | Build tooling | **Vite owns build/dev.** gulp, flow, babel-register, styleguidist and source-map-explorer are gone. |
-| D4 | react-uwp replacement | **Local components + tokens.** Ten primitives in `src/components/ui/`; themes are `--kos-*` token overrides (windows default, macos/gnome/kde stubs). |
+| D4 | react-uwp replacement | **Local components + tokens.** Ten primitives in `src/components/ui/`; themes are `--kos-*` token overrides (windows default plus macos/gnome/kde overrides, switchable from the start menu). |
 | D5 | Window resize | **Kept `react-rnd`** (10.x), driving drag/resize with the behaviour contract intact. |
 | D6 | Scope | **Full code modernization**, delivered: TS + React 19 + Vite frontend, Go server, rewritten docs, and clean `npm audit` / `govulncheck` baselines. |

@@ -24,6 +24,10 @@ themes are included.
     <br>
 </p>
 
+<p align="center">
+  <img width="900px" src="Kos-Screenie.jpeg" alt="Full-screenshot of the KuberneticOS desktop">
+</p>
+
 ## About
 
 KuberneticOS is a browser desktop environment for Kubernetes. A taskbar, start

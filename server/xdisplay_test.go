@@ -527,6 +527,9 @@ func TestXDisplaySweeper(t *testing.T) {
 	if !strings.Contains(joined, "team-a|app-1|web|/bin/sh -c kill -TERM -4321") {
 		t.Errorf("sweep never killed the app process group; calls:\n%s", joined)
 	}
+	if !strings.Contains(joined, `team-a|app-1|web|/bin/sh -c rm -f `) {
+		t.Errorf("sweep never removed the app pod's cookie file; calls:\n%s", joined)
+	}
 	if !strings.Contains(joined, `kos|kos-xserver-0||/bin/sh -c xauth -f /kos/.Xauthority -q remove ":21" 2>/dev/null`) {
 		t.Errorf("sweep never removed the xauth entry on the xserver pod; calls:\n%s", joined)
 	}
@@ -542,9 +545,10 @@ func TestXDisplaySweeper(t *testing.T) {
 		t.Fatalf("display not freed by the sweep: %v", err)
 	}
 
-	// One pass only issues kill + xauth remove for the one expired session.
-	if len(calls) != 2 {
-		t.Fatalf("exec calls = %d (%v), want 2", len(calls), calls)
+	// One pass only issues the three teardown steps for the one expired
+	// session (kill the app, drop its cookie file, remove the xauth row).
+	if len(calls) != 3 {
+		t.Fatalf("exec calls = %d (%v), want 3", len(calls), calls)
 	}
 }
 
@@ -651,6 +655,10 @@ func TestHandleXDisplayCreateOffline(t *testing.T) {
 // must SURVIVE the handler: the deferred failure-cleanup release must not
 // fire on the success path, or every fresh token would die at once.
 func TestHandleXDisplayCreateLive(t *testing.T) {
+	// No idle-grace teardown in this test: the goroutine schedule itself is
+	// covered by TestHandleXDisplayIdleGraceLive; here the success path and
+	// its exec legs are the contract.
+	t.Setenv("KOS_XDISPLAY_WS_GRACE", "0")
 	alloc := testAllocator(t)
 	a := testAPI(t, alloc)
 	var calls []string
@@ -698,6 +706,168 @@ func TestHandleXDisplayCreateLive(t *testing.T) {
 		!strings.HasPrefix(calls[1], "appns|app-pod|web|/bin/sh -c read -r COOKIE") {
 		t.Fatalf("exec calls = %v, want append-on-xserver then launch-on-app", calls)
 	}
+}
+
+// TestXDisplayWSGraceGeneration pins the reconnect-guard arithmetic of the
+// idle-grace release: only the close of the NEWEST stream generation may
+// free the allocation, and no combination can double-free.
+func TestXDisplayWSGraceGeneration(t *testing.T) {
+	alloc := testAllocator(t)
+
+	// Generation 0 = the token never streamed; the never-streamed guard
+	// fires with this generation and must free the allocation.
+	d1, tok, err := alloc.allocate()
+	if err != nil {
+		t.Fatalf("allocate: %v", err)
+	}
+	_ = d1
+	if _, ok := alloc.releaseIfIdle(tok, 0); !ok {
+		t.Fatal("never-streamed token was not reclaimed by the gen-0 fire")
+	}
+
+	// Double-fire is a no-op (already freed).
+	if _, ok := alloc.releaseIfIdle(tok, 0); ok {
+		t.Fatal("double idle release succeeded")
+	}
+
+	// A streamed session shadows older generations: every fire whose
+	// generation is behind the newest touch must leave it alone.
+	d2, tok2, err := alloc.allocate()
+	if err != nil || d2 != 21 {
+		t.Fatalf("second allocate: %v", err)
+	}
+	if gen := alloc.touchWSGen(d2); gen != 1 {
+		t.Fatalf("first touch gen = %d, want 1", gen)
+	}
+	if _, ok := alloc.releaseIfIdle(tok2, 0); ok {
+		t.Fatal("gen-0 fire reclaimed a streamed session")
+	}
+	if _, ok := alloc.releaseIfIdle(tok2, 7); ok {
+		t.Fatal("future-generation fire reclaimed a streamed session")
+	}
+	if gen := alloc.touchWSGen(d2); gen != 2 {
+		t.Fatalf("second touch gen = %d, want 2", gen)
+	}
+	if _, ok := alloc.releaseIfIdle(tok2, 1); ok {
+		t.Fatal("stale generation reclaimed the session after a reconnect")
+	}
+
+	// The newest generation frees it exactly once.
+	s, ok := alloc.releaseIfIdle(tok2, 2)
+	if !ok || s.token != tok2 || s.display != d2 {
+		t.Fatalf("newest-gen release: (%+v, %v)", s, ok)
+	}
+	if _, tok3, err := alloc.allocate(); err != nil || tok3 == tok2 {
+		t.Fatalf("display not freed by the idle release: %v", err)
+	}
+	if _, ok := alloc.releaseIfIdle(tok2, 2); ok {
+		t.Fatal("double newest-gen release succeeded")
+	}
+}
+
+// TestHandleXDisplayIdleGraceLive drives the leaked-session safety net
+// through real handlers: a POST whose stream never opens is torn down by
+// the gen-0 fire; a POST whose stream dies is torn down by the newest-
+// generation fire exactly once, with the full teardown exec triple.
+func TestHandleXDisplayIdleGraceLive(t *testing.T) {
+	newAPI := func(t *testing.T, calls *[]string) (*xDisplayAllocator, *api) {
+		t.Helper()
+		alloc := testAllocator(t)
+		a := testAPI(t, alloc)
+		a.clientset = fakeXServerClient(t, "127.0.0.1")
+		a.execer = func(_ context.Context, namespace, pod, container string, command []string, _ []byte) (string, error) {
+			*calls = append(*calls, strings.Join([]string{namespace, pod, container, strings.Join(command, " ")}, "|"))
+			if strings.Join(command, " ") == "/bin/sh -c "+xAuthAppendScript() {
+				return "", nil
+			}
+			return "4321\n", nil
+		}
+		return alloc, a
+	}
+	body := `{"namespace":"appns","pod":"app-pod","container":"web","app":"xclock","command":["xclock"]}`
+
+	t.Run("never streamed", func(t *testing.T) {
+		t.Setenv("KOS_XDISPLAY_WS_GRACE", "50ms")
+		var calls []string
+		alloc, a := newAPI(t, &calls)
+		rec := serveXDisplay(t, a, http.MethodPost, "/api/xdisplay", body)
+		assertStatus(t, rec, http.StatusOK)
+		token := decodeBody[xDisplayResponse](t, rec).Token
+		deadline := time.Now().Add(3 * time.Second)
+		for {
+			if _, ok := alloc.lookup(token); !ok {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("never-streamed session survived the idle grace")
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		joined := strings.Join(calls, "\n")
+		if !strings.Contains(joined, "appns|app-pod|web|/bin/sh -c kill -TERM -4321") {
+			t.Errorf("gen-0 fire never killed the app; calls:\n%s", joined)
+		}
+		if !strings.Contains(joined, `kos|kos-xserver-0||/bin/sh -c xauth -f`) {
+			t.Errorf("gen-0 fire never removed the xauth row; calls:\n%s", joined)
+		}
+	})
+
+	t.Run("stream closed", func(t *testing.T) {
+		t.Setenv("KOS_XDISPLAY_WS_GRACE", "150ms")
+		t.Setenv("KOS_XDISPLAY_DIALER", "direct")
+		var calls []string
+		alloc, a := newAPI(t, &calls)
+		rec := serveXDisplay(t, a, http.MethodPost, "/api/xdisplay", body)
+		assertStatus(t, rec, http.StatusOK)
+		token := decodeBody[xDisplayResponse](t, rec).Token
+
+		srv := httptest.NewServer(newMux(a))
+		defer srv.Close()
+		ws, _, err := websocket.DefaultDialer.Dial(
+			"ws"+strings.TrimPrefix(srv.URL, "http")+"/api/xdisplay/ws?token="+token, nil)
+		if err != nil {
+			t.Fatalf("dial ws: %v", err)
+		}
+		ws.SetReadDeadline(time.Now().Add(3 * time.Second))
+		if _, _, rerr := ws.ReadMessage(); rerr == nil {
+			t.Fatal("expected a close after the failed upstream dial")
+		}
+		ws.Close()
+
+		deadline := time.Now().Add(3 * time.Second)
+		for {
+			if _, ok := alloc.lookup(token); !ok {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("closed-stream session survived the idle grace")
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+
+		joined := strings.Join(calls, "\n")
+		// Create legs (append + launch) then the teardown triple — each
+		// exactly once; the create-fire (gen 0) must NOT tear down, only
+		// the newest-generation fire from the stream close does. NOTE: one
+		// xauth call is a single script line containing two removes (the
+		// plain and the wild row), so count CALLS, not phrase hits.
+		if got := strings.Count(joined, "kill -TERM -4321"); got != 1 {
+			t.Errorf("kill leg ran %d times, want 1; calls:\n%s", got, joined)
+		}
+		var xauthCalls int
+		for _, call := range calls {
+			if strings.Contains(call, "xauth -f /kos/.Xauthority -q remove") {
+				xauthCalls++
+			}
+		}
+		if xauthCalls != 1 {
+			t.Errorf("xauth remove ran %d calls, want 1; calls:\n%s", xauthCalls, joined)
+		}
+		// Display freed for reallocation (pool is 2).
+		if _, _, err := alloc.allocate(); err != nil {
+			t.Fatalf("display not freed after idle-grace teardown: %v", err)
+		}
+	})
 }
 
 func TestHandleXDisplayDeleteValidation(t *testing.T) {

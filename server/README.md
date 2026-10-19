@@ -42,6 +42,7 @@ above.
 | `KOS_XDISPLAY_START` | `21` | First Xvfb display number handed out by the display allocator |
 | `KOS_XDISPLAY_POOL` | `5` | Number of displays in the static pool (`:START` … `:START+N-1`) |
 | `KOS_XDISPLAY_TTL` | `12h` | Lifetime of an xdisplay session token (modifiable reconnects/`DELETE` semantics unchanged) |
+| `KOS_XDISPLAY_WS_GRACE` | `1m` | Leaked-allocation safety net: a session whose RFB websocket is gone and stays gone (no newer stream re-opened) is torn down (app killed, xauth/cookie cleaned, display freed) this long after the last stream ends; `0` disables (fell back to TTL-only in that case) |
 | `KOS_XSERVER_NAMESPACE` | `kos` | Namespace of the central shared X server pod |
 | `KOS_XSERVER_POD` | `kos-xserver-0` | X server pod name (xauth exec target; pod IP only for `direct` dialer mode probes) |
 | `KOS_XSERVER_SERVICE` | `kos-xserver` | X server service name (DISPLAY FQDN `<svc>.<ns>.svc`) |
@@ -159,6 +160,19 @@ unknown/expired tokens answer `404`. `list`/`health` follow the metrics
 philosophy: HTTP 200 with `available:false` when offline or the xserver is
 unreachable — never a 5xx. `POST /api/xdisplay` on an exhausted pool answers
 `503`.
+
+**Leaked-allocation safety net** (`KOS_XDISPLAY_WS_GRACE`, default `1m`): the
+browser is the only consumer of a display, so when a session's websocket is
+gone and stays gone — tab killed before the client-side `DELETE`, dev-server
+reload, a stream idling out on a static screen followed by a fresh `POST` —
+the allocation would pin a display until the TTL. Instead, each wall of the
+lifecycle schedules a delayed teardown: `POST` records the never-streamed
+generation, and every `ws` close records the newest-stream generation
+(incremented per opened stream). If, after the grace window, the token still
+exists and no **newer** generation touched it, the display is freed and the
+app torn down (same best-effort kill/cookie/xauth steps as `DELETE`); a
+reconnect before the deadline (generation moved on) cancels the pending
+teardown. `0` opts out and restores TTL-only semantics.
 
 The two metrics endpoints are the exception to the error mapping: they read
 CPU/memory from `metrics.k8s.io/v1beta1` (via the

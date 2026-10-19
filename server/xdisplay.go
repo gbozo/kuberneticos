@@ -83,6 +83,17 @@ const (
 	// allocation maps).
 	xdisplaySweepInterval = time.Minute
 	xdisplaySweepTimeout  = time.Minute
+
+	// Idle-grace safety net against leaked allocations: when a token's
+	// websocket ends without the DELETE racing in (browser killed without
+	// unmount cleanup, tab crash, dev-server reload, a static screen
+	// idling into the stream idle timeout + retry churn), the display
+	// would stay pinned until the 12h TTL. Instead, once the stream is
+	// gone and stays gone — no newer stream re-opened, see wsGen — for
+	// defaultXDisplayWSGrace, the session is torn down (app killed, auth
+	// cleaned, display freed). Env: KOS_XDISPLAY_WS_GRACE; "0" disables.
+	defaultXDisplayWSGrace = time.Minute
+	envXDisplayWSGrace     = "KOS_XDISPLAY_WS_GRACE"
 )
 
 // xDisplaySession is one allocated window/display. The token is a random
@@ -102,6 +113,10 @@ type xDisplaySession struct {
 	createdAt time.Time
 	expiresAt time.Time
 	vncPort   int
+	// wsGen counts the streams the token ever opened (incremented on each
+	// websocket upgrade). The idle-grace release compares generations at
+	// fire time: only the newest-stream close may trigger the teardown.
+	wsGen uint64
 }
 
 // xDisplayAllocator is the in-memory registry of active sessions, guarded
@@ -208,21 +223,76 @@ func (s *xdisplaySweeper) sweep(ctx context.Context) {
 	defer cancel()
 
 	for _, session := range s.collect(s.now()) {
-		if session.pid != "" {
-			if _, err := s.exec(ctx, session.namespace, session.pod, session.container,
-				xKillArgs(session.pid), nil); err != nil {
-				log.Printf("sweeper: killing pid %s (%s/%s) failed: %v",
-					session.pid, session.namespace, session.pod, err)
-			}
-		}
-		if _, err := s.exec(ctx, s.xserver.namespace, s.xserver.pod, "",
-			xAuthRemoveArgs(session.display), nil); err != nil {
-			log.Printf("sweeper: xauth remove for display :%d failed: %v", session.display, err)
-		}
+		xSessionTeardown(ctx, s.exec, session, s.xserver)
 		// collectExpired already purged the maps; release() still runs as
 		// the single source of truth for freeing (it is a no-op here).
 		s.release(session.display)
 	}
+}
+
+// xTeardownExec is the exec seam the session teardown paths run their
+// cluster execs through (DELETE handler, TTL sweeper, idle-grace release).
+type xTeardownExec = func(
+	ctx context.Context, namespace, pod, container string, command []string, stdin []byte,
+) (string, error)
+
+// xSessionTeardown runs the per-session cleanup execs: kill the recorded
+// process-group leader in the app pod, drop the per-display cookie file,
+// remove the xauth entries on the xserver pod. Every step is best effort —
+// the display allocation is freed by the caller before this runs and stays
+// the source of truth; a pod that is already gone only costs log lines.
+func xSessionTeardown(ctx context.Context, exec xTeardownExec, s xDisplaySession, coord xserverCoord) {
+	if s.pid != "" {
+		if _, err := exec(ctx, s.namespace, s.pod, s.container, xKillArgs(s.pid), nil); err != nil {
+			log.Printf("xdisplay: killing pid %s in %s/%s failed: %v", s.pid, s.namespace, s.pod, err)
+		}
+	}
+	if _, err := exec(ctx, s.namespace, s.pod, s.container,
+		[]string{"/bin/sh", "-c", "rm -f " + shellSingleQuote(xauthPath(s.display))}, nil); err != nil {
+		log.Printf("xdisplay: cookie cleanup in %s/%s failed: %v", s.namespace, s.pod, err)
+	}
+	if _, err := exec(ctx, coord.namespace, coord.pod, "", xAuthRemoveArgs(s.display), nil); err != nil {
+		log.Printf("xdisplay: xauth remove for display :%d failed: %v", s.display, err)
+	}
+}
+
+// xIdleGraceRelease is the leaked-allocation safety net: the websocket leg's
+// browser can vanish without the DELETE racing in (killed tab, dev reload,
+// idle-close). If, after grace, no newer stream has touched the token
+// (wsGen comparison), the display is freed and the app torn down. The ctx
+// only decides whether server shutdown can still cancel the wait.
+func xIdleGraceRelease(ctx context.Context, exec xTeardownExec, alloc *xDisplayAllocator,
+	coord xserverCoord, token string, gen uint64, grace time.Duration,
+) {
+	if grace <= 0 {
+		return
+	}
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return
+	case <-timer.C:
+	}
+	session, ok := alloc.releaseIfIdle(token, gen)
+	if !ok {
+		return
+	}
+	log.Printf("xdisplay: idle-grace release for display :%d after stream close", session.display)
+	tctx, cancel := context.WithTimeout(ctx, xdisplaySweepTimeout)
+	defer cancel()
+	xSessionTeardown(tctx, exec, session, coord)
+}
+
+// xdisplayWSIdleGrace reads KOS_XDISPLAY_WS_GRACE; "0" disables the net,
+// anything else parseable overrides the default.
+func xdisplayWSIdleGrace() time.Duration {
+	if raw := os.Getenv(envXDisplayWSGrace); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d >= 0 {
+			return d
+		}
+	}
+	return defaultXDisplayWSGrace
 }
 
 // run drives sweep() once per interval until ctx is cancelled. Main wires
@@ -343,6 +413,40 @@ func (x *xDisplayAllocator) release(display int) {
 		delete(x.byToken, s.token)
 		delete(x.sessions, display)
 	}
+}
+
+// touchWSGen bumps (and returns) the session's websocket generation: one
+// increment per opened stream, handled at upgrade time. The idle-grace
+// release compares generations at fire time — a newer generation means a
+// stream re-opened (reconnect after refresh) and the allocation must stay.
+func (x *xDisplayAllocator) touchWSGen(display int) uint64 {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	s, ok := x.sessions[display]
+	if !ok {
+		return 0
+	}
+	s.wsGen++
+	return s.wsGen
+}
+
+// releaseIfIdle frees the session — exactly once, atomically — when the
+// stream identified by gen is still the newest the token ever opened
+// (nothing re-connected during the grace window). TTL expiry, a DELETE
+// racing first, or a reconnect all leave the maps untouched (ok=false);
+// otherwise the maps are freed here and the caller runs the teardown
+// execs on the returned snapshot.
+func (x *xDisplayAllocator) releaseIfIdle(token string, gen uint64) (xDisplaySession, bool) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	s, ok := x.byToken[token]
+	if !ok || s.wsGen != gen {
+		return xDisplaySession{}, false
+	}
+	out := *s
+	delete(x.byToken, token)
+	delete(x.sessions, out.display)
+	return out, true
 }
 
 // list returns the active sessions ordered by display number, skipping
@@ -529,6 +633,19 @@ func (a *api) xExec(ctx context.Context, namespace, pod, container string, comma
 	return execRun(ctx, a.restConfig, namespace, pod, container, command, stdin)
 }
 
+// teardownExec returns the exec seam for the teardown paths (DELETE,
+// idle-grace release): the injected test execer when present, otherwise
+// the real execRun against restConfig.
+func (a *api) teardownExec() xTeardownExec {
+	if a.execer != nil {
+		return a.execer
+	}
+	cfg := a.restConfig
+	return func(ctx context.Context, namespace, pod, container string, command []string, stdin []byte) (string, error) {
+		return execRun(ctx, cfg, namespace, pod, container, command, stdin)
+	}
+}
+
 // xKillArgs terminates the recorded process group (TERM, then a short
 // kill -0 wait loop, then KILL in case the app ignored TERM) via the app
 // pod. The launch wrapper runs the GUI under setsid, so the recorded PID
@@ -688,6 +805,16 @@ func (a *api) handleXDisplayCreate(w http.ResponseWriter, r *http.Request) {
 	// must not run past this point.
 	released = true
 	a.xdisplay.record(display, token, req, pid)
+
+	// Never-streamed allocation guard: a POST whose websocket never opens
+	// (browser died between the two calls) would otherwise hold a display
+	// until the TTL sweep. Generation 0 = no stream has touched the token
+	// yet; any open stream bumps it and cancels this teardown.
+	if grace := xdisplayWSIdleGrace(); grace > 0 {
+		go xIdleGraceRelease(context.WithoutCancel(ctx), a.teardownExec(),
+			a.xdisplay, newXServerCoord(), token, 0, grace)
+	}
+
 	writeJSON(w, http.StatusOK, xDisplayResponse{
 		Source:  a.source,
 		Display: display,
@@ -754,29 +881,12 @@ func (a *api) handleXDisplayDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Kill the GUI process group leader inside the app pod. Any error is
-	// logged but the display is still freed: keeping a leaked allocation
-	// locked forever because the pod is already gone would be worse.
+	// Best-effort teardown (kill + cookie cleanup + xauth remove): the
+	// display is freed afterwards regardless, so a pod that is already
+	// gone only costs log lines and never leaks the allocation.
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	if session.pid != "" {
-		if _, err := execRun(ctx, a.restConfig, session.namespace, session.pod, session.container,
-			xKillArgs(session.pid), nil); err != nil {
-			log.Printf("xdisplay: killing pid %s in %s/%s failed: %v", session.pid, session.namespace, session.pod, err)
-		}
-	}
-
-	// Best-effort cleanup: drop the cookie file in the app pod and the
-	// xauth entries on the server.
-	if _, err := execRun(ctx, a.restConfig, session.namespace, session.pod, session.container,
-		[]string{"/bin/sh", "-c", "rm -f " + shellSingleQuote(xauthPath(session.display))}, nil); err != nil {
-		log.Printf("xdisplay: cookie cleanup in %s/%s failed: %v", session.namespace, session.pod, err)
-	}
-	coord := newXServerCoord()
-	if _, err := execRun(ctx, a.restConfig, coord.namespace, coord.pod, "",
-		xAuthRemoveArgs(session.display), nil); err != nil {
-		log.Printf("xdisplay: xauth remove failed: %v", err)
-	}
+	xSessionTeardown(ctx, a.teardownExec(), *session, newXServerCoord())
 
 	a.xdisplay.release(session.display)
 
@@ -1169,6 +1279,19 @@ func (a *api) handleXDisplayWS(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		writeJSON(w, http.StatusNotFound, errorResponse{Error: "unknown or expired display token"})
 		return
+	}
+
+	// Idle-grace safety net: whatever ends this request (upgrade failure,
+	// dial failure, proxy end, browser disconnect, stream idle close)
+	// schedules a teardown that fires after the grace window unless a
+	// newer stream re-opened the token in the meantime (wsGen guard).
+	// Without it a vanished browser holds its display until the TTL sweep.
+	wsGen := a.xdisplay.touchWSGen(session.display)
+	if grace := xdisplayWSIdleGrace(); grace > 0 {
+		defer func() {
+			go xIdleGraceRelease(context.WithoutCancel(r.Context()), a.teardownExec(),
+				a.xdisplay, newXServerCoord(), token, wsGen, grace)
+		}()
 	}
 
 	// Everything the request must learn through HTTP JSON happens BEFORE

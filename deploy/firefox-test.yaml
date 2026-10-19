@@ -31,7 +31,9 @@ spec:
           resources:
             requests:
               cpu: 100m
-              memory: 256Mi
+              memory: 512Mi
             limits:
               cpu: '2'
-              memory: 1Gi
+              # Firefox on the web (YouTube *4 restarts OOMKilled at 1Gi)
+              # blows through tighter caps on video playback.
+              memory: 3Gi

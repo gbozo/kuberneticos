@@ -54,7 +54,9 @@ for n in $(seq "$XDISPLAY_START" "$XDISPLAY_END"); do
     echo ""
     echo "[program:openbox-${n}]"
     echo "environment=DISPLAY=\":${n}\",XAUTHORITY=\"${XAUTH_FILE}\""
-    echo "command=openbox"
+    # Kiosk config: no window decorations (the kOS browser window is the
+    # chrome) and one maximized application per display.
+    echo "command=openbox --config-file /kos/openbox-rc.xml"
     echo "autorestart=true"
     echo ""
     echo "[program:vnc-${n}]"

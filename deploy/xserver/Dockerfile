@@ -41,6 +41,7 @@ WORKDIR /kos
 # unix socket, .Xauthority).
 RUN chown -R kos:kos /kos
 COPY --chown=kos:kos supervisord.conf /kos/supervisord.conf
+COPY --chown=kos:kos openbox-rc.xml /kos/openbox-rc.xml
 COPY --chown=kos:kos entrypoint.sh /usr/local/bin/kos-entrypoint
 RUN chmod 0755 /usr/local/bin/kos-entrypoint
 

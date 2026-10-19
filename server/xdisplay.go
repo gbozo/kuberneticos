@@ -533,15 +533,16 @@ func xAuthAppendScript() string {
 printf %%s "$COOKIE" | base64 -d >> %[1]s || exit 3`, xauthDBPath())
 }
 
-// xAuthRemoveArgs unregisters the cookie entries on release (best effort).
-// The DB path is explicit so the removes target the right database
-// regardless of the exec's $HOME. The first line keeps cleaning the legacy
-// `xauth add "host:N"` record shape, the second the FamilyWild row
-// appended at create time; both are no-ops when the entry is gone.
+// xAuthRemoveArgs unregisters the session's cookie entries on release
+// (best effort). It must target ONLY the FamilyWild row appended at create
+// time (`#ffff#:N`): a bare `xauth -f db remove ":N"` display spec also
+// strips the entrypoint's persistent family-local record
+// (kos-xserver-N/unix:N) that in-pod clients (openbox, x11vnc) need to
+// authenticate against the running Xvfb, so one session teardown would
+// wedge every later local client on that display.
 func xAuthRemoveArgs(display int) []string {
 	script := fmt.Sprintf(
-		`xauth -f %[1]s -q remove ":%[2]d" 2>/dev/null; `+
-			`xauth -f %[1]s -q remove "#ffff#:%[2]d" 2>/dev/null; true`,
+		`xauth -f %[1]s -q remove "#ffff#:%[2]d" 2>/dev/null; true`,
 		xauthDBPath(), display)
 	return []string{"/bin/sh", "-c", script}
 }

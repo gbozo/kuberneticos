@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  kos-xserver openbox config — KIOSK mode.
+
+  Each xserver display hosts EXACTLY ONE client application whose pixels are
+  streamed into a kOS browser window (the XDesktop RFB leg). The kOS Window
+  component already provides the native chrome (title bar, minimize, close,
+  resize, focus), so openbox must not draw a second title bar: its only job
+  here is focus/key handling. Every mapped window is therefore rendered
+  undecorated and maximized to fill the Xvfb screen, i.e. the RFB stream shows
+  the application content only.
+-->
+<openbox_config xmlns="http://openbox.org/" xmlns:xlink="http://www.w3.org/1999/xlink">
+
+  <theme>
+    <!-- Unused while decor is off; a safe Debian default anyway. -->
+    <name>Clearlooks</name>
+  </theme>
+
+  <desktops>
+    <number>1</number>
+  </desktops>
+
+  <!-- Maximised rules are re-applied by openbox whenever the window maps,
+       so a relaunched app always fills the edgeless screen again. -->
+  <applications>
+    <application class="*">
+      <decor>no</decor>
+      <maximized>yes</maximized>
+      <position force="yes"> <x>0</x> <y>0</y> </position>
+    </application>
+  </applications>
+
+</openbox_config>

@@ -282,10 +282,12 @@ func TestXAuthRemoveArgsScript(t *testing.T) {
 		t.Fatalf("xAuthRemoveArgs = %+v, want ['/bin/sh','-c',script]", rm)
 	}
 	// Explicit -f: the removes must target the server DB regardless of $HOME.
-	if !strings.Contains(rm[2], `xauth -f /kos/.Xauthority -q remove ":21" 2>/dev/null`) {
-		t.Errorf("remove script misses the legacy record line: %s", rm[2])
+	// ONLY the FamilyWild row may be removed: a bare `remove ":21"` display
+	// spec also strips the entrypoint's persistent family-local record that
+	// in-pod clients (openbox, x11vnc) authenticate with.
+	if strings.Contains(rm[2], `remove ":21"`) {
+		t.Errorf("remove script must not strip the persistent display entry: %s", rm[2])
 	}
-	// The FamilyWild row appended at create time is removed too.
 	if !strings.Contains(rm[2], `xauth -f /kos/.Xauthority -q remove "#ffff#:21" 2>/dev/null`) {
 		t.Errorf("remove script misses the wild-record line: %s", rm[2])
 	}
@@ -296,8 +298,7 @@ func TestXAuthRemoveArgsScript(t *testing.T) {
 	t.Run("db path env override", func(t *testing.T) {
 		t.Setenv("KOS_XAUTH_DB", "/data/xauth")
 		rm := xAuthRemoveArgs(9)
-		if !strings.Contains(rm[2], `xauth -f /data/xauth -q remove ":9"`) ||
-			!strings.Contains(rm[2], `xauth -f /data/xauth -q remove "#ffff#:9"`) {
+		if !strings.Contains(rm[2], `xauth -f /data/xauth -q remove "#ffff#:9"`) {
 			t.Errorf("remove script ignored the env DB path: %s", rm[2])
 		}
 	})
@@ -530,7 +531,7 @@ func TestXDisplaySweeper(t *testing.T) {
 	if !strings.Contains(joined, `team-a|app-1|web|/bin/sh -c rm -f `) {
 		t.Errorf("sweep never removed the app pod's cookie file; calls:\n%s", joined)
 	}
-	if !strings.Contains(joined, `kos|kos-xserver-0||/bin/sh -c xauth -f /kos/.Xauthority -q remove ":21" 2>/dev/null`) {
+	if !strings.Contains(joined, `kos|kos-xserver-0||/bin/sh -c xauth -f /kos/.Xauthority -q remove "#ffff#:21" 2>/dev/null`) {
 		t.Errorf("sweep never removed the xauth entry on the xserver pod; calls:\n%s", joined)
 	}
 

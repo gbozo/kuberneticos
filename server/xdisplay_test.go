@@ -1,13 +1,20 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
+	"encoding/hex"
+	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +22,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/httpstream"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
 )
@@ -258,30 +266,61 @@ func TestXDisplayAllocatorEnvConfig(t *testing.T) {
 }
 
 func TestXAuthArgs(t *testing.T) {
-	cookie := "abcdef0123456789abcdef0123456789"
-
-	add := xAuthAddArgs(21, "kos-xserver.kos.svc", cookie)
-	if len(add) != 3 || add[0] != "/bin/sh" {
-		t.Fatalf("xAuthAddArgs = %+v", add)
-	}
-	if !strings.Contains(add[2], `xauth add ":21" MIT-COOKIE-1 `+cookie) {
-		t.Errorf("add script missing local entry: %s", add[2])
-	}
-	if !strings.Contains(add[2], `xauth add "kos-xserver.kos.svc:21" MIT-COOKIE-1 `+cookie) {
-		t.Errorf("add script missing FQDN entry: %s", add[2])
-	}
-
-	rm := xAuthRemoveArgs(21, "kos-xserver.kos.svc")
-	if !strings.Contains(rm[2], `xauth remove ":21"`) {
-		t.Errorf("remove script = %s", rm[2])
-	}
-
 	kill := xKillArgs("1207")
 	if !strings.Contains(kill[2], "kill -TERM -1207") || !strings.Contains(kill[2], "kill -KILL -1207") {
 		t.Errorf("kill script must signal the process group: %s", kill[2])
 	}
 	if strings.Contains(kill[2], "sleep 1") {
 		t.Errorf("kill script must not hardcode a 1s sleep: %s", kill[2])
+	}
+}
+
+func TestXAuthRemoveArgsScript(t *testing.T) {
+	t.Setenv("KOS_XAUTH_DB", "")
+	rm := xAuthRemoveArgs(21)
+	if len(rm) != 3 || rm[0] != "/bin/sh" || rm[1] != "-c" {
+		t.Fatalf("xAuthRemoveArgs = %+v, want ['/bin/sh','-c',script]", rm)
+	}
+	// Explicit -f: the removes must target the server DB regardless of $HOME.
+	if !strings.Contains(rm[2], `xauth -f /kos/.Xauthority -q remove ":21" 2>/dev/null`) {
+		t.Errorf("remove script misses the legacy record line: %s", rm[2])
+	}
+	// The FamilyWild row appended at create time is removed too.
+	if !strings.Contains(rm[2], `xauth -f /kos/.Xauthority -q remove "#ffff#:21" 2>/dev/null`) {
+		t.Errorf("remove script misses the wild-record line: %s", rm[2])
+	}
+	if !strings.Contains(rm[2], "; true") {
+		t.Errorf("remove script must end successfully for absent entries: %s", rm[2])
+	}
+
+	t.Run("db path env override", func(t *testing.T) {
+		t.Setenv("KOS_XAUTH_DB", "/data/xauth")
+		rm := xAuthRemoveArgs(9)
+		if !strings.Contains(rm[2], `xauth -f /data/xauth -q remove ":9"`) ||
+			!strings.Contains(rm[2], `xauth -f /data/xauth -q remove "#ffff#:9"`) {
+			t.Errorf("remove script ignored the env DB path: %s", rm[2])
+		}
+	})
+}
+
+func TestXAuthAppendScriptAndStdin(t *testing.T) {
+	t.Setenv("KOS_XAUTH_DB", "")
+	script := xAuthAppendScript()
+	if !strings.Contains(script, `read -r COOKIE || exit 3`) {
+		t.Errorf("append script missing stdin read: %s", script)
+	}
+	if !strings.Contains(script, `printf %s "$COOKIE" | base64 -d >> /kos/.Xauthority || exit 3`) {
+		t.Errorf("append script = %s", script)
+	}
+
+	record := []byte{0xFA, 0xCE, 0xBA, 0xBE}
+	stdin := xAuthAppendStdin(record)
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSuffix(string(stdin), "\n"))
+	if err != nil {
+		t.Fatalf("append stdin is not valid base64: %v", err)
+	}
+	if !bytes.Equal(decoded, record) || !strings.HasSuffix(string(stdin), "\n") {
+		t.Errorf("append stdin = %q, want base64(%x) + one newline", stdin, record)
 	}
 }
 
@@ -300,16 +339,19 @@ func TestShellSingleQuote(t *testing.T) {
 func TestXLaunchScript(t *testing.T) {
 	script := xLaunchScript("kos-xserver.kos.svc", 21, "/tmp/.kos-xauth-21", []string{"firefox", "--no-remote"})
 
-	// The wrapper must tolerate a cookie line without the trailing newline
-	// (some exec transports trim it) and must fail loudly otherwise.
-	if !strings.Contains(script, `read -r COOKIE || [ -n "$COOKIE" ] || exit 97`) {
-		t.Errorf("script must read the cookie tolerantly: %s", script)
+	// The read line doubles as the TEMP launch diagnostic: on EOF it echoes
+	// the read's exit status and the received length to stderr, then still
+	// fails loudly (exit 97) on an empty cookie.
+	if !strings.HasPrefix(script, `read -r COOKIE || { echo "xlaunch: read-empty rc=$? len=$(printf %s "$COOKIE" | wc -c)" >&2; [ -n "$COOKIE" ] || exit 97; }`+"\n") {
+		t.Errorf("script must start with the instrumented read line: %s", script)
 	}
-	if !strings.Contains(script, "base64 -d") {
-		t.Errorf("script must decode the cookie from stdin: %s", script)
+	// The Xauthority record is pre-serialized (see xAuthFileBytes) and is
+	// decoded straight into the file — stock app pods have no xauth binary.
+	if !strings.Contains(script, "base64 -d > /tmp/.kos-xauth-21") {
+		t.Errorf("script must decode the record straight into the Xauthority file: %s", script)
 	}
-	if !strings.Contains(script, `xauth -f /tmp/.kos-xauth-21 add kos-xserver.kos.svc:21 MIT-COOKIE-1`) {
-		t.Errorf("script must provision XAUTHORITY via xauth: %s", script)
+	if strings.Contains(script, "xauth ") {
+		t.Errorf("script must not invoke xauth (stock app pods lack the binary): %s", script)
 	}
 	// The GUI is launched in the BACKGROUND under setsid and the wrapper
 	// prints $! (the setsid leader PID, whose pgid equals the PID) then
@@ -317,8 +359,8 @@ func TestXLaunchScript(t *testing.T) {
 	if !strings.Contains(script, `setsid env DISPLAY=kos-xserver.kos.svc:21 XAUTHORITY=/tmp/.kos-xauth-21 'firefox' '--no-remote' </dev/null >/dev/null 2>&1 & echo $!`) {
 		t.Errorf("script must background the command under setsid and echo $!: %s", script)
 	}
-	if !strings.Contains(script, "exit 0") {
-		t.Errorf("script must exit 0 right after backgrounding: %s", script)
+	if !strings.HasSuffix(script, "exit 0") {
+		t.Errorf("script must end with exit 0 right after backgrounding: %s", script)
 	}
 	if strings.Contains(script, "exec env") {
 		t.Errorf("script must not exec the GUI in the wrapper's process: %s", script)
@@ -329,15 +371,122 @@ func TestXLaunchScript(t *testing.T) {
 	}
 }
 
-// TestXLaunchStdinCookieContract pins the exact stdin bytes the launch exec
-// sends: base64(cookie) plus ONE terminating newline. `read -r` at EOF only
+// TestXLaunchStdinRecordContract pins the exact stdin bytes the launch exec
+// sends: base64(record) plus ONE terminating newline. `read -r` at EOF only
 // succeeds for newline-terminated input; both sides of this contract are
 // asserted here and in the script check above.
-func TestXLaunchStdinCookieContract(t *testing.T) {
-	stdin := xLaunchStdin("cafebabe1234")
-	want := base64.StdEncoding.EncodeToString([]byte("cafebabe1234")) + "\n"
+func TestXLaunchStdinRecordContract(t *testing.T) {
+	record := []byte{0xFA, 0xCE, 0xBA, 0xBE, 0x12, 0x34}
+	stdin := xLaunchStdin(record)
+	want := base64.StdEncoding.EncodeToString(record) + "\n"
 	if string(stdin) != want {
 		t.Fatalf("stdin = %q, want %q", stdin, want)
+	}
+	if !strings.HasSuffix(string(stdin), "\n") {
+		t.Fatalf("stdin must end with a single terminating newline: %q", stdin)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSuffix(string(stdin), "\n"))
+	if err != nil {
+		t.Fatalf("stdin payload is not valid base64: %v", err)
+	}
+	if !bytes.Equal(decoded, record) {
+		t.Fatalf("decoded payload = %x, want %x", decoded, record)
+	}
+}
+
+// TestXAuthFileBytesGolden serializes the live-observed cookie
+// ad044a09d81aff580c25d368d8d998bd and pins the exact record bytes: one
+// MIT-MAGIC-COOKIE-1 Xauthority entry, FamilyWild (0xFFFF) with an empty
+// address, the length-prefixed display number string ("21"), then name and
+// data — every length field big-endian uint16, 46 bytes total.
+func TestXAuthFileBytesGolden(t *testing.T) {
+	const cookieHex = "ad044a09d81aff580c25d368d8d998bd"
+	raw, err := hex.DecodeString(cookieHex)
+	if err != nil {
+		t.Fatalf("test cookie is not hex: %v", err)
+	}
+	name := []byte("MIT-MAGIC-COOKIE-1")
+
+	t.Run("display_21", func(t *testing.T) {
+		displayStr := "21"
+		var want []byte
+		want = binary.BigEndian.AppendUint16(want, 0xFFFF) // FamilyWild
+		want = binary.BigEndian.AppendUint16(want, 0)      // empty address
+		want = binary.BigEndian.AppendUint16(want, uint16(len(displayStr)))
+		want = append(want, displayStr...)
+		want = binary.BigEndian.AppendUint16(want, uint16(len(name)))
+		want = append(want, name...)
+		want = binary.BigEndian.AppendUint16(want, uint16(len(raw)))
+		want = append(want, raw...)
+
+		got, err := xAuthFileBytes(cookieHex, 21)
+		if err != nil {
+			t.Fatalf("xAuthFileBytes(%q, 21): %v", cookieHex, err)
+		}
+		if len(got) != 46 {
+			t.Fatalf("record length = %d, want 46", len(got))
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("record = %x, want %x", got, want)
+		}
+	})
+
+	for _, tc := range []struct {
+		name       string
+		display    int
+		numLen     int
+		displayStr string
+	}{
+		{"display_9", 9, 1, "9"},
+		{"display_100", 100, 3, "100"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := xAuthFileBytes(cookieHex, tc.display)
+			if err != nil {
+				t.Fatalf("xAuthFileBytes(%q, %d): %v", cookieHex, tc.display, err)
+			}
+			if wantLen := 46 - 2 + tc.numLen; len(got) != wantLen {
+				t.Fatalf("record length = %d, want %d", len(got), wantLen)
+			}
+			numLen := int(binary.BigEndian.Uint16(got[4:6]))
+			if numLen != tc.numLen {
+				t.Errorf("numLen = %d, want %d", numLen, tc.numLen)
+			}
+			if string(got[6:6+numLen]) != tc.displayStr {
+				t.Errorf("num bytes = %q, want %q", got[6:6+numLen], tc.displayStr)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name string
+		hex  string
+	}{
+		{"invalid hex", "zz044a09"},
+		{"odd length hex", "abc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := xAuthFileBytes(tc.hex, 21); err == nil {
+				t.Fatalf("xAuthFileBytes(%q) must fail, got nil error", tc.hex)
+			}
+		})
+	}
+}
+
+// TestXAuthFileBytesRoundTrip sanity-checks the pipe: record -> base64
+// (StdEncoding, exactly what xLaunchStdin sends) -> decode -> the original
+// bytes come back intact.
+func TestXAuthFileBytesRoundTrip(t *testing.T) {
+	record, err := xAuthFileBytes("ad044a09d81aff580c25d368d8d998bd", 21)
+	if err != nil {
+		t.Fatalf("xAuthFileBytes: %v", err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(xLaunchStdin(record))))
+	if err != nil {
+		t.Fatalf("base64 decode of launch stdin: %v", err)
+	}
+	if !bytes.Equal(record, decoded) {
+		t.Fatalf("round trip mismatch: got %x, want %x", decoded, record)
 	}
 }
 
@@ -347,6 +496,7 @@ func TestXLaunchStdinCookieContract(t *testing.T) {
 // executor, no cluster involved.
 func TestXDisplaySweeper(t *testing.T) {
 	alloc := testAllocator(t)
+	t.Setenv("KOS_XAUTH_DB", "")
 	display, token, err := alloc.allocate()
 	if err != nil {
 		t.Fatalf("allocate: %v", err)
@@ -377,7 +527,7 @@ func TestXDisplaySweeper(t *testing.T) {
 	if !strings.Contains(joined, "team-a|app-1|web|/bin/sh -c kill -TERM -4321") {
 		t.Errorf("sweep never killed the app process group; calls:\n%s", joined)
 	}
-	if !strings.Contains(joined, "kos|kos-xserver-0||/bin/sh -c xauth remove \":21\" 2>/dev/null") {
+	if !strings.Contains(joined, `kos|kos-xserver-0||/bin/sh -c xauth -f /kos/.Xauthority -q remove ":21" 2>/dev/null`) {
 		t.Errorf("sweep never removed the xauth entry on the xserver pod; calls:\n%s", joined)
 	}
 
@@ -492,6 +642,61 @@ func TestHandleXDisplayCreateOffline(t *testing.T) {
 	got := decodeBody[errorResponse](t, rec)
 	if !strings.Contains(got.Error, "offline") {
 		t.Errorf("error = %q, want offline", got.Error)
+	}
+}
+
+// TestHandleXDisplayCreateLive pins the create success path end-to-end
+// through the exec seam: append on the xserver pod (record bytes on stdin),
+// launch in the app pod (PID on stdout), 200 with token — and the session
+// must SURVIVE the handler: the deferred failure-cleanup release must not
+// fire on the success path, or every fresh token would die at once.
+func TestHandleXDisplayCreateLive(t *testing.T) {
+	alloc := testAllocator(t)
+	a := testAPI(t, alloc)
+	var calls []string
+	a.execer = func(_ context.Context, namespace, pod, container string, command []string, stdin []byte) (string, error) {
+		calls = append(calls, strings.Join([]string{namespace, pod, container, strings.Join(command, " ")}, "|"))
+		if strings.Join(command, " ") != "/bin/sh -c "+xAuthAppendScript() {
+			// The launch exec: PID line like the real wrapper prints.
+			return "4321\n", nil
+		}
+		if !strings.HasSuffix(string(stdin), "\n") || string(stdin) == "\n" {
+			t.Errorf("append stdin = %q, want base64 record + newline", stdin)
+		}
+		return "", nil
+	}
+
+	rec := serveXDisplay(t, a, http.MethodPost, "/api/xdisplay",
+		`{"namespace":"appns","pod":"app-pod","container":"web","app":"xclock","command":["xclock"]}`)
+	assertStatus(t, rec, http.StatusOK)
+	got := decodeBody[xDisplayResponse](t, rec)
+	if got.Source != liveSource || got.Display != 21 || len(got.Token) != 32 {
+		t.Fatalf("body = %+v", got)
+	}
+	if got.WSPath != "/api/xdisplay/ws?token="+got.Token {
+		t.Fatalf("wsPath = %q", got.WSPath)
+	}
+
+	// The session must still be alive for the whole lifecycle.
+	s, ok := alloc.lookup(got.Token)
+	if !ok {
+		t.Fatal("fresh token already dead after create")
+	}
+	if s.display != 21 || s.pid != "4321" || s.app != "xclock" || s.namespace != "appns" || s.pod != "app-pod" || s.container != "web" {
+		t.Errorf("session = %+v", s)
+	}
+	if _, ok := alloc.lookupByDisplay(21); !ok {
+		t.Fatal("display free right after a successful create")
+	}
+	if len(alloc.list(time.Now())) != 1 {
+		t.Fatal("list does not show the fresh session")
+	}
+
+	// Both exec legs ran, in order, against the right pods.
+	if len(calls) != 2 ||
+		!strings.HasPrefix(calls[0], "kos|kos-xserver-0||/bin/sh -c read -r COOKIE") ||
+		!strings.HasPrefix(calls[1], "appns|app-pod|web|/bin/sh -c read -r COOKIE") {
+		t.Fatalf("exec calls = %v, want append-on-xserver then launch-on-app", calls)
 	}
 }
 
@@ -642,6 +847,9 @@ func TestHandleXDisplayHealthLive(t *testing.T) {
 	})
 
 	t.Run("VNC port listening -> available true", func(t *testing.T) {
+		// Direct dialer semantics; the portfw probe of this same situation
+		// is covered by "pod scheduled -> available true" below.
+		t.Setenv("KOS_XDISPLAY_DIALER", "direct")
 		listener, err := net.Listen("tcp", "127.0.0.1:5921")
 		if err != nil {
 			t.Skipf("cannot bind 127.0.0.1:5921: %v", err)
@@ -665,6 +873,9 @@ func TestHandleXDisplayHealthLive(t *testing.T) {
 	})
 
 	t.Run("pod up, VNC port closed -> available false", func(t *testing.T) {
+		// Direct dialer semantics: the TCP probe decides availability even
+		// though the pod itself answers.
+		t.Setenv("KOS_XDISPLAY_DIALER", "direct")
 		alloc := testAllocator(t)
 		a := &api{
 			client:     &stubClient{},
@@ -678,6 +889,44 @@ func TestHandleXDisplayHealthLive(t *testing.T) {
 		got := decodeBody[xDisplayHealthResponse](t, rec)
 		if got.Available {
 			t.Errorf("body = %+v, want available=false for a closed port", got)
+		}
+	})
+
+	t.Run("pod scheduled -> available true (portfw probe)", func(t *testing.T) {
+		// Port-forward mode serves kos-server from outside the cluster: a
+		// pod-IP TCP probe would always fail, so availability is the pod
+		// get alone — even with nothing listening (the ws probe would
+		// succeed if there were nothing here).
+		alloc := testAllocator(t)
+		a := &api{
+			client:     &stubClient{},
+			source:     liveSource,
+			clientset:  fakeXServerClient(t, "127.0.0.1"),
+			restConfig: &rest.Config{},
+			xdisplay:   alloc,
+		}
+		rec := serveXDisplay(t, a, http.MethodGet, "/api/xdisplay/health", "")
+		assertStatus(t, rec, http.StatusOK)
+		got := decodeBody[xDisplayHealthResponse](t, rec)
+		if !got.Available {
+			t.Errorf("body = %+v, want available by pod get alone in portfw mode", got)
+		}
+	})
+
+	t.Run("pod without IP -> available false (portfw probe)", func(t *testing.T) {
+		alloc := testAllocator(t)
+		a := &api{
+			client:     &stubClient{},
+			source:     liveSource,
+			clientset:  fakeXServerClient(t, ""),
+			restConfig: &rest.Config{},
+			xdisplay:   alloc,
+		}
+		rec := serveXDisplay(t, a, http.MethodGet, "/api/xdisplay/health", "")
+		assertStatus(t, rec, http.StatusOK)
+		got := decodeBody[xDisplayHealthResponse](t, rec)
+		if got.Available {
+			t.Errorf("body = %+v, want available=false for an unscheduled pod", got)
 		}
 	})
 }
@@ -703,7 +952,12 @@ func TestHandleXDisplayWSValidation(t *testing.T) {
 // TestHandleXDisplayWSProxy runs the full websockify pipeline against a
 // fake RFB TCP listener: binary frames flow both directions and the stream
 // closes cleanly from both ends (works offline; no cluster involved).
+// Direct dialer mode, since this test stands in for an in-cluster
+// deployment with a convincing pod IP; the port-forward leg has its own
+// fake-dialer test below.
 func TestHandleXDisplayWSProxy(t *testing.T) {
+	t.Setenv("KOS_XDISPLAY_DIALER", "direct")
+
 	listener, err := net.Listen("tcp", "127.0.0.1:5921")
 	if err != nil {
 		t.Skipf("cannot bind 127.0.0.1:5921: %v", err)
@@ -844,4 +1098,423 @@ func full(b []byte) []byte {
 		return []byte{}
 	}
 	return b
+}
+
+// ---------------------------------------------------------------------------
+// KOS_XDISPLAY_DIALER + api-server port-forward tests
+// ---------------------------------------------------------------------------
+
+func TestXDisplayDialerModeEnv(t *testing.T) {
+	cases := []struct {
+		set  string
+		want xDisplayDialerMode
+	}{
+		{"", xDialerPortFw},         // default: port-forward tunnel
+		{"portfw", xDialerPortFw},   // explicit default
+		{"direct", xDialerDirect},   // legacy direct dial
+		{"DIRECT", xDialerDirect},   // case-insensitive
+		{" direct ", xDialerDirect}, // tolerant trim
+		{"garbage", xDialerPortFw},  // unknown values fall back to the tunnel
+	}
+	for _, tc := range cases {
+		t.Run("env="+tc.set, func(t *testing.T) {
+			t.Setenv("KOS_XDISPLAY_DIALER", tc.set)
+			if got := xdisplayDialerMode(); got != tc.want {
+				t.Fatalf("xdisplayDialerMode() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestXPortForwardRequestURL(t *testing.T) {
+	raw, err := xPortForwardRequestURL(&rest.Config{Host: "https://apiserver.example:6443"},
+		"kos", "kos-xserver-0", 5921)
+	if err != nil {
+		t.Fatalf("xPortForwardRequestURL: %v", err)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("built url %q: %v", raw, err)
+	}
+	if u.Host != "apiserver.example:6443" || u.Path != "/api/v1/namespaces/kos/pods/kos-xserver-0/portforward" {
+		t.Fatalf("url = %q", u)
+	}
+	if q := u.Query().Get("ports"); q != "5921" {
+		t.Fatalf("ports = %q, want 5921", q)
+	}
+
+	for _, bad := range []struct {
+		ns, pod string
+		port    int
+	}{{"../etc", "p", 5921}, {"kos", "p p", 5921}, {"kos", "x", 0}, {"kos", "x", 70000}} {
+		if _, err := xPortForwardRequestURL(&rest.Config{Host: "https://a.there"}, bad.ns, bad.pod, bad.port); err == nil {
+			t.Errorf("xPortForwardRequestURL(%q, %q, %d) accepted garbage", bad.ns, bad.pod, bad.port)
+		}
+	}
+}
+
+// TestXPodDialerDeadAPIServer pins the bounded, descriptive failure of the
+// port-forward dial when the apiserver cannot be reached at all (no tunnel
+// in the test environment): both dialers fail fast.
+func TestXPodDialerDeadAPIServer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err := xPodDialer(ctx, &rest.Config{Host: "http://127.0.0.1:1"}, "kos", "kos-xserver-0", 5921)
+	if err == nil {
+		t.Fatal("dialer succeeded against a closed apiserver port")
+	}
+	for _, want := range []string{"port-forward", "kos", "kos-xserver-0", "5921"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q misses %q", err, want)
+		}
+	}
+}
+
+// TestXPodDialerBoundedByContext proves the dial is bounded: an apiserver
+// that accepts the connection but never completes the upgrade cannot stall
+// the dialer past the (caller-supplied, here shortened) budget.
+func TestXPodDialerBoundedByContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Never answer the upgrade. The tunneling dialer issues its
+		// roundtrip on a background context (client-go keeps no ctx
+		// parameter), so the caller's cancelation cannot unwind it — the
+		// test therefore self-releases the stuck handler instead of
+		// blocking srv.Close() on it forever.
+		select {
+		case <-r.Context().Done():
+		case <-time.After(2 * time.Second):
+		}
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := xPodDialer(ctx, &rest.Config{Host: srv.URL}, "kos", "kos-xserver-0", 5921)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("dialer succeeded against a hanging apiserver")
+	}
+	if !strings.Contains(err.Error(), "not ready after") {
+		t.Errorf("error = %q, want the bounded 'not ready after …' failure", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("dial took %s, want a ~250ms bound", elapsed)
+	}
+}
+
+// fakePFStream is one port-forward stream end (minimal httpstream.Stream).
+type fakePFStream struct {
+	read    *io.PipeReader
+	write   *io.PipeWriter
+	headers http.Header
+}
+
+func (s *fakePFStream) Read(p []byte) (int, error)  { return s.read.Read(p) }
+func (s *fakePFStream) Write(p []byte) (int, error) { return s.write.Write(p) }
+func (s *fakePFStream) Close() error {
+	s.read.Close()
+	s.write.Close()
+	return nil
+}
+func (s *fakePFStream) Reset() error         { return s.read.Close() }
+func (s *fakePFStream) Headers() http.Header { return s.headers }
+func (s *fakePFStream) Identifier() uint32   { return 7 }
+
+// fakePFConn mimics the upgraded portforward httpstream.Connection: every
+// CreateStream answers with a pipe-backed stream (unless seeded to fail);
+// the far ends are kept for the test to read client-side writes and push
+// apiserver-side bytes.
+type fakePFConn struct {
+	mu         sync.Mutex
+	remote     map[string]*fakePFStream // far ends by corev1.StreamType+"-r"
+	requestIDs []string                 // one per created stream
+	nextErr    error
+	closed     chan struct{}
+	closeOnce  sync.Once
+}
+
+func newFakePFConn(err error) *fakePFConn {
+	return &fakePFConn{remote: map[string]*fakePFStream{}, closed: make(chan struct{}), nextErr: err}
+}
+
+func (c *fakePFConn) CreateStream(headers http.Header) (httpstream.Stream, error) {
+	if c.nextErr != nil {
+		return nil, c.nextErr
+	}
+	clientR, remoteW := io.Pipe() // kos-server → apiserver
+	remoteR, clientW := io.Pipe() // apiserver → kos-server
+	kind := headers.Get(corev1.StreamType)
+	c.mu.Lock()
+	c.remote[kind+"-r"] = &fakePFStream{read: remoteR, write: remoteW, headers: headers.Clone()}
+	c.requestIDs = append(c.requestIDs, headers.Get(corev1.PortForwardRequestIDHeader))
+	c.mu.Unlock()
+	return &fakePFStream{read: clientR, write: clientW, headers: headers.Clone()}, nil
+}
+
+func (c *fakePFConn) Close() error {
+	c.closeOnce.Do(func() {
+		c.mu.Lock()
+		for _, s := range c.remote {
+			s.read.Close()
+			s.write.Close()
+		}
+		c.mu.Unlock()
+		close(c.closed)
+	})
+	return nil
+}
+
+func (c *fakePFConn) CloseChan() <-chan bool             { return nil }
+func (c *fakePFConn) SetIdleTimeout(time.Duration)       {}
+func (c *fakePFConn) RemoveStreams(...httpstream.Stream) {}
+
+func TestXForwardedConnStreams(t *testing.T) {
+	conn := newFakePFConn(nil)
+
+	upstream, err := xForwardedConn(conn, 5921)
+	if err != nil {
+		t.Fatalf("xForwardedConn: %v", err)
+	}
+
+	// Stream headers must follow the portforward dialect (the same pair
+	// PortForwarder.handleConnection writes).
+	conn.mu.Lock()
+	errStream := conn.remote[corev1.StreamTypeError+"-r"]
+	conn.mu.Unlock()
+	if errStream == nil {
+		t.Fatal("no error stream created")
+	}
+	if h := errStream.headers.Get(corev1.PortHeader); h != "5921" {
+		t.Errorf("PortHeader = %q, want 5921", h)
+	}
+	if h := errStream.headers.Get(corev1.StreamType); h != corev1.StreamTypeError {
+		t.Errorf("error StreamType = %q", h)
+	}
+	conn.mu.Lock()
+	ids := conn.requestIDs
+	conn.mu.Unlock()
+	// Both streams of the pair carry the same requestID (the forwarding
+	// request layout PortForwarder.handleConnection uses).
+	if len(ids) != 2 || ids[0] == "" || ids[0] != ids[1] {
+		t.Fatalf("requestID headers = %v, want the same non-empty id on both streams of the pair", ids)
+	}
+
+	// kos-server → apiserver → far end. The remote reader runs first: pipe
+	// writes block until a reader shows up.
+	buf := make([]byte, 32)
+	remoteGot := make(chan string, 1)
+	conn.mu.Lock()
+	dataRemote := conn.remote[corev1.StreamTypeData+"-r"]
+	conn.mu.Unlock()
+	go func() {
+		n, _ := dataRemote.read.Read(buf)
+		remoteGot <- string(buf[:n])
+	}()
+	if _, err := upstream.Write([]byte("RFB 003.008\n")); err != nil {
+		t.Fatalf("upstream write: %v", err)
+	}
+	if got := <-remoteGot; got != "RFB 003.008\n" {
+		t.Fatalf("remote got %q", got)
+	}
+
+	// apiserver → kos-server: the remote pushes bytes into the data
+	// stream and the net.Conn surface delivers them.
+	go func() {
+		_, _ = dataRemote.write.Write([]byte("vnc-frame"))
+	}()
+	_ = upstream.SetReadDeadline(time.Now().Add(2 * time.Second)) // accepted no-op
+	n, err := upstream.Read(buf)
+	if err != nil || string(buf[:n]) != "vnc-frame" {
+		t.Fatalf("upstream read = %q, %v", buf[:n], err)
+	}
+
+	// An apiserver-reported forwarding error tears the connection down:
+	// the proxy legs must observe it (abrupt close propagation).
+	if _, err := errStream.write.Write([]byte("port forward setup failed")); err != nil {
+		t.Fatalf("error-stream write: %v", err)
+	}
+	select {
+	case <-conn.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("apiserver error text never propagated to conn close")
+	}
+	if _, rerr := upstream.Read(buf); rerr == nil {
+		t.Fatal("upstream still readable after apiserver error")
+	}
+}
+
+func TestXForwardedConnCreateStreamFailure(t *testing.T) {
+	conn := newFakePFConn(errors.New("stream rejected"))
+	if _, err := xForwardedConn(conn, 5921); err == nil {
+		t.Fatal("create-stream failure must fail the wrap")
+	}
+	select {
+	case <-conn.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("create-stream failure must close the connection")
+	}
+}
+
+func TestXForwardedConnRequestIDsUnique(t *testing.T) {
+	c1 := newFakePFConn(nil)
+	if _, err := xForwardedConn(c1, 5921); err != nil {
+		t.Fatalf("wrap 1: %v", err)
+	}
+	c2 := newFakePFConn(nil)
+	if _, err := xForwardedConn(c2, 5922); err != nil {
+		t.Fatalf("wrap 2: %v", err)
+	}
+	c1.mu.Lock()
+	id1 := c1.requestIDs[0]
+	c1.mu.Unlock()
+	c2.mu.Lock()
+	id2 := c2.requestIDs[0]
+	c2.mu.Unlock()
+	if id1 == "" || id1 == id2 {
+		t.Fatalf("requestIDs must be unique per forward: %q vs %q", id1, id2)
+	}
+}
+
+// readWithTimeout reads from a plain io.Reader (no deadline support) with a
+// bound, so a stuck pipe read fails the test instead of hanging it.
+func readWithTimeout(r io.Reader, buf []byte, budget time.Duration) (int, error) {
+	type result struct {
+		n   int
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		n, err := r.Read(buf)
+		done <- result{n, err}
+	}()
+	select {
+	case res := <-done:
+		return res.n, res.err
+	case <-time.After(budget):
+		return 0, errors.New("read did not complete in time")
+	}
+}
+
+// seamNetConn is a net.Conn standing in for the cluster leg of proxyRFB in
+// the fake-dialer test: both halves are io.Pipe pairs the test controls,
+// and Close signals the test so propagation can be asserted.
+type seamNetConn struct {
+	readR     *io.PipeReader
+	readW     *io.PipeWriter
+	writeR    *io.PipeReader
+	writeW    *io.PipeWriter
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func (c *seamNetConn) Read(p []byte) (int, error)  { return c.readR.Read(p) }
+func (c *seamNetConn) Write(p []byte) (int, error) { return c.writeW.Write(p) }
+func (c *seamNetConn) Close() error {
+	c.closeOnce.Do(func() {
+		c.readR.Close()
+		c.writeR.Close()
+		close(c.closed)
+	})
+	return nil
+}
+func (c *seamNetConn) LocalAddr() net.Addr              { return xForwardedAddr{} }
+func (c *seamNetConn) RemoteAddr() net.Addr             { return xForwardedAddr{} }
+func (c *seamNetConn) SetDeadline(time.Time) error      { return nil }
+func (c *seamNetConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *seamNetConn) SetWriteDeadline(time.Time) error { return nil }
+
+// TestHandleXDisplayWSPortFwDialerSeam runs the full websockify pipeline in
+// the (default) portfw mode with an injected fake dialer: the handler hands
+// proxyRFB whatever xDial returns, binary frames flow both directions,
+// xDial receives the session coordinates, and closing the browser side
+// propagates the close into the dialed conn.
+func TestHandleXDisplayWSPortFwDialerSeam(t *testing.T) {
+	alloc := testAllocator(t)
+	display, token, err := alloc.allocate()
+	if err != nil {
+		t.Fatalf("allocate: %v", err)
+	}
+	// The session's namespace/pod identify the APP pod the GUI runs in;
+	// the port-forward leg must ignore them and dial the X SERVER pod.
+	alloc.record(display, token, xDisplayRequest{
+		Namespace: "appns", Pod: "app-pod", Command: []string{"firefox"},
+	}, "77")
+
+	a := testAPI(t, alloc)
+
+	// Fake cluster leg: browser-facing on one half, test-controlled bytes
+	// on the other half of each pipe pair.
+	conn := &seamNetConn{closed: make(chan struct{})}
+	conn.readR, conn.readW = io.Pipe()
+	conn.writeR, conn.writeW = io.Pipe()
+	dialed := make(chan chan struct{}, 1)
+
+	a.xdialer = func(ctx context.Context, namespace, pod string, port int) (net.Conn, error) {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		coord := newXServerCoord()
+		if namespace != coord.namespace || pod != coord.pod || port != 5900+display {
+			t.Errorf("xDial = %s/%s port %d, want the xserver pod %s/%s port 5900+%d",
+				namespace, pod, port, coord.namespace, coord.pod, display)
+		}
+		select {
+		case dialed <- conn.closed:
+		default:
+		}
+		return conn, nil
+	}
+
+	srv := httptest.NewServer(newMux(a))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/xdisplay/ws?token=" + token
+	browser, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial ws: %v (status %v)", err, resp.StatusCode)
+	}
+	defer browser.Close()
+
+	select {
+	case <-dialed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler never dialed the fake port-forward leg")
+	}
+
+	// cluster → browser
+	go func() {
+		_, _ = conn.readW.Write([]byte("RFB 003.008\n"))
+	}()
+	browser.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, msg, err := browser.ReadMessage()
+	if err != nil {
+		t.Fatalf("browser read: %v", err)
+	}
+	if string(msg) != "RFB 003.008\n" {
+		t.Fatalf("browser got %q, want RFB banner", msg)
+	}
+
+	// browser → cluster
+	if err := browser.WriteMessage(websocket.BinaryMessage, []byte{0x01, 0x02}); err != nil {
+		t.Fatalf("browser write: %v", err)
+	}
+	buf := make([]byte, 32)
+	if n, rerr := readWithTimeout(conn.writeR, buf, 2*time.Second); rerr != nil || string(buf[:n]) != "\x01\x02" {
+		t.Fatalf("cluster got % X, %v; want 0102", buf[:n], rerr)
+	}
+
+	// Browser disconnect must reach the fake dialer's conn (close
+	// propagation through proxyRFB) with a clean close handshake.
+	if err := browser.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second)); err != nil {
+		_ = browser.Close()
+	}
+	select {
+	case <-conn.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("browser close did not propagate into the dialed conn")
+	}
 }

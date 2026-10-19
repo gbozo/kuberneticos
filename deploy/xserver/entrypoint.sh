@@ -69,4 +69,11 @@ done
 echo "kos-xserver: runtime conf ready -> ${RUNTIME_CONF}"
 
 export XAUTHORITY="$XAUTH_FILE"
+
+# k8s containers inherit a huge RLIMIT_NOFILE; libvncserver (x11vnc 0.9.16)
+# scans the whole fd table once before accept() (fcntl F_GETFD per fd), which
+# spins unbounded and wedges every RFB listener. Cap it for supervisord and
+# everything it spawns.
+ulimit -n 1024
+
 exec supervisord -n -c "$RUNTIME_CONF"

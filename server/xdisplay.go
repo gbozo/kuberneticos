@@ -17,6 +17,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -25,17 +26,23 @@ import (
 	"log"
 	"net"
 	"net/http"
+	urlpkg "net/url"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/httpstream"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/portforward"
+	spdy "k8s.io/client-go/transport/spdy"
 )
 
 const (
@@ -53,8 +60,23 @@ const (
 	// (so :21 → 5921), matching the xserver deployment.
 	vncBasePort = 5900
 
-	// xdisplayDialTimeout bounds the TCP dial to the x11vnc listener.
+	// xdisplayDialTimeout bounds the TCP dial to the x11vnc listener
+	// (direct mode only; in-cluster kos-server deployments get the cheaper
+	// direct route to a node-local pod IP).
 	xdisplayDialTimeout = 3 * time.Second
+
+	// envXDisplayDialer selects how the RFB proxy reaches the x11vnc
+	// listener: "portfw" (default) tunnels the TCP stream through the
+	// Kubernetes API server port-forward subresource — required when
+	// kos-server runs OUTSIDE the cluster (apiserver tunnel, no pod-IP
+	// route); "direct" dials podIP:5900+N as before.
+	envXDisplayDialer = "KOS_XDISPLAY_DIALER"
+
+	// xdisplayPortFwDialTimeout bounds the whole port-forward dial
+	// sequence (apiserver request upgrade + data/error stream setup),
+	// which traverses the tunnel/apiserver and is slower than a local TCP
+	// connect.
+	xdisplayPortFwDialTimeout = 10 * time.Second
 
 	// Background sweeper cadence: one expired-session cleanup pass per
 	// minute (kill orphaned GUI processes, remove xauth entries, purge the
@@ -194,7 +216,7 @@ func (s *xdisplaySweeper) sweep(ctx context.Context) {
 			}
 		}
 		if _, err := s.exec(ctx, s.xserver.namespace, s.xserver.pod, "",
-			xAuthRemoveArgs(session.display, s.xserver.displayHost()), nil); err != nil {
+			xAuthRemoveArgs(session.display), nil); err != nil {
 			log.Printf("sweeper: xauth remove for display :%d failed: %v", session.display, err)
 		}
 		// collectExpired already purged the maps; release() still runs as
@@ -350,9 +372,9 @@ func newXDisplayToken() (string, error) {
 }
 
 // newXDisplayCookie is an xauth key: 16 random bytes, hex encoded — the
-// exact string both `xauth add` invocations and the XAUTHORITY database
-// generated inside the app pod use. Random because a leaked cookie would
-// grant X11 access to a whole display.
+// exact string xAuthFileBytes serializes into both the X server DB record
+// and the XAUTHORITY file generated inside the app pod. Random because a
+// leaked cookie would grant X11 access to a whole display.
 func newXDisplayCookie() (string, error) {
 	return newXDisplayToken()
 }
@@ -391,35 +413,45 @@ func shellSingleQuote(arg string) string {
 	return "'" + strings.ReplaceAll(arg, "'", `'\''`) + "'"
 }
 
-// xAuthAddArgs builds the exec that registers the cookie on the X server
-// side, against both display naming forms (own-server-local ":N" and the
-// namespace-qualified FQDN) so clients connecting either way authenticate.
-// Best-effort on the FQDN form: some clusters resolve DNS differently and
-// xauth's address handling follows the resolver.
-func xAuthAddArgs(display int, host, cookie string) []string {
-	script := fmt.Sprintf(
-		"xauth add \":%[1]d\" MIT-COOKIE-1 %[2]s; "+
-			"xauth add \"%[3]s:%[1]d\" MIT-COOKIE-1 %[2]s 2>/dev/null || true",
-		display, cookie, host)
-	return []string{"/bin/sh", "-c", script}
+// xauthDBPath is the system Xauthority database file inside the X server
+// pod (KOS_XAUTH_DB for deployments that mount it elsewhere).
+func xauthDBPath() string {
+	return envOrDefault("KOS_XAUTH_DB", "/kos/.Xauthority")
+}
+
+// xAuthAppendScript builds the sh one-liner exec-ed into the X server pod
+// to APPEND one serialized Xauthority record to the DB file: the record
+// arrives base64-encoded on exec stdin (never argv) and is decoded onto
+// the file. `xauth` itself is not needed — the raw bytes are appended —
+// and an append failure exits 3 so the caller can log/answer 500.
+func xAuthAppendScript() string {
+	return fmt.Sprintf(`read -r COOKIE || exit 3
+printf %%s "$COOKIE" | base64 -d >> %[1]s || exit 3`, xauthDBPath())
 }
 
 // xAuthRemoveArgs unregisters the cookie entries on release (best effort).
-func xAuthRemoveArgs(display int, host string) []string {
+// The DB path is explicit so the removes target the right database
+// regardless of the exec's $HOME. The first line keeps cleaning the legacy
+// `xauth add "host:N"` record shape, the second the FamilyWild row
+// appended at create time; both are no-ops when the entry is gone.
+func xAuthRemoveArgs(display int) []string {
 	script := fmt.Sprintf(
-		"xauth remove \":%[1]d\" 2>/dev/null; "+
-			"xauth remove \"%[2]s:%[1]d\" 2>/dev/null; true",
-		display, host)
+		`xauth -f %[1]s -q remove ":%[2]d" 2>/dev/null; `+
+			`xauth -f %[1]s -q remove "#ffff#:%[2]d" 2>/dev/null; true`,
+		xauthDBPath(), display)
 	return []string{"/bin/sh", "-c", script}
 }
 
 // xLaunchScript builds the shell program exec-ed into the app pod:
-//  1. read the base64 blob piped through the exec stdin (the cookie is a
-//     secret and must not linger in argv/ps output; `read -r` with the
-//     `[ -n "$COOKIE" ]` fallback tolerates a final line without a newline,
-//     which is how some exec transports deliver the single-line body);
-//  2. decode it and let `xauth -f` build a real Xauthority database for
-//     the FQDN display name (falling back to the bare ":N" form);
+//  1. read the base64 blob piped through the exec stdin (the record is a
+//     secret and must not linger in argv/ps output; the read doubles as a
+//     TEMP diagnostic — on EOF it echoes the read's exit status and the
+//     received length to stderr so a malformed exec transport is visible
+//     in the pod logs — and still exits 97 on an empty cookie);
+//  2. decode it straight into the Xauthority file: the blob is already a
+//     serialized binary MIT-COOKIE-1 record (see xAuthFileBytes) built
+//     with FamilyWild, so the app pod needs NO `xauth` binary (stock
+//     containers usually lack one — "xauth: not found" killed the launch);
 //  3. start the GUI command in the background via setsid — as the fresh
 //     session leader its PID equals its process group ID, which is what
 //     DELETE must kill (`kill -TERM -PID`). The wrapper exits 0 right
@@ -431,20 +463,70 @@ func xLaunchScript(host string, display int, xauthPath string, command []string)
 	for i, arg := range command {
 		quoted[i] = shellSingleQuote(arg)
 	}
-	return fmt.Sprintf(`read -r COOKIE || [ -n "$COOKIE" ] || exit 97
-HEX=$(printf %%s "$COOKIE" | base64 -d) || exit 98
-xauth -f %[4]s add %[2]s:%[1]d MIT-COOKIE-1 "$HEX" 2>/dev/null || xauth -f %[4]s add :%[1]d MIT-COOKIE-1 "$HEX" || exit 99
-setsid env DISPLAY=%[2]s:%[1]d XAUTHORITY=%[4]s %[3]s </dev/null >/dev/null 2>&1 & echo $!
+	return fmt.Sprintf(`read -r COOKIE || { echo "xlaunch: read-empty rc=$? len=$(printf %%s "$COOKIE" | wc -c)" >&2; [ -n "$COOKIE" ] || exit 97; }
+printf %%s "$COOKIE" | base64 -d > %[3]s || exit 98
+setsid env DISPLAY=%[2]s:%[1]d XAUTHORITY=%[3]s %[4]s </dev/null >/dev/null 2>&1 & echo $!
 exit 0`,
-		display, host, strings.Join(quoted, " "), xauthPath)
+		display, host, xauthPath, strings.Join(quoted, " "))
 }
 
-// xLaunchStdin builds the launch exec's exact stdin: the base64 cookie
-// (secret — never argv) followed by a terminating newline so `read -r` at
-// EOF succeeds. The launch script additionally tolerates the missing
-// newline for transports that trim it.
-func xLaunchStdin(cookie string) []byte {
-	return []byte(base64.StdEncoding.EncodeToString([]byte(cookie)) + "\n")
+// xAuthFileBytes serializes ONE binary MIT-COOKIE-1 Xauthority record for
+// the given lowercase-hex cookie and display number, with the full record
+// layout: family FamilyWild (0xFFFF) with an empty address, the length-
+// prefixed DISPLAY NUMBER string, the magic name and the decoded cookie
+// bytes — every length field a big-endian uint16. FamilyWild makes the
+// record match for ANY display/connection (the standard x11docker-style
+// trick), so the same record works both client-side inside the app pod
+// (no `xauth` binary needed) and server-side in the X server's DB.
+func xAuthFileBytes(cookieHex string, display int) ([]byte, error) {
+	decoded, err := hex.DecodeString(cookieHex)
+	if err != nil {
+		return nil, fmt.Errorf("cookie is not valid hex: %w", err)
+	}
+	numStr := strconv.Itoa(display)
+	name := []byte("MIT-MAGIC-COOKIE-1")
+	buf := make([]byte, 0, 10+len(numStr)+len(name)+len(decoded))
+	buf = binary.BigEndian.AppendUint16(buf, 0xFFFF) // FamilyWild
+	buf = binary.BigEndian.AppendUint16(buf, 0)      // empty address
+	buf = binary.BigEndian.AppendUint16(buf, uint16(len(numStr)))
+	buf = append(buf, numStr...)
+	buf = binary.BigEndian.AppendUint16(buf, uint16(len(name)))
+	buf = append(buf, name...)
+	buf = binary.BigEndian.AppendUint16(buf, uint16(len(decoded)))
+	return append(buf, decoded...), nil
+}
+
+// xLaunchStdin builds the launch exec's exact stdin: the already-serialized
+// base64-encoded Xauthority record (secret — never argv) followed by a
+// terminating newline so `read -r` at EOF succeeds. The launch script
+// additionally tolerates the missing newline for transports that trim it.
+func xLaunchStdin(record []byte) []byte {
+	return b64Stdin(record)
+}
+
+// xAuthAppendStdin builds the xauth-append exec's stdin, sharing the
+// base64-encoding contract with xLaunchStdin (secret on stdin, one
+// terminating newline so `read`/decode succeeds).
+func xAuthAppendStdin(record []byte) []byte {
+	return b64Stdin(record)
+}
+
+// b64Stdin encodes a secret payload for exec stdin: base64 body plus one
+// terminating newline, the contract the server-side decode script and the
+// launch script both rely on.
+func b64Stdin(b []byte) []byte {
+	return []byte(base64.StdEncoding.EncodeToString(b) + "\n")
+}
+
+// xExec runs an exec through the api's exec seam: the real execRun unless
+// a test injected an execer (mirrors the xdialer seam for the websocket
+// leg). Used by the create handler so its success path is unit-testable
+// without a cluster.
+func (a *api) xExec(ctx context.Context, namespace, pod, container string, command []string, stdin []byte) (string, error) {
+	if a.execer != nil {
+		return a.execer(ctx, namespace, pod, container, command, stdin)
+	}
+	return execRun(ctx, a.restConfig, namespace, pod, container, command, stdin)
 }
 
 // xKillArgs terminates the recorded process group (TERM, then a short
@@ -553,32 +635,44 @@ func (a *api) handleXDisplayCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 
-	// 1) Register the cookie on the X server (system Xauthority managed by
-	// the xserver deployment).
+	// 1) Build the record once (also used for the app pod's client-side
+	// file) and APPEND it to the X server's system Xauthority: a
+	// FamilyWild row, because the server side rejects records whose
+	// address cannot match the connecting client pod IP.
 	cookie, err := newXDisplayCookie()
 	if err != nil {
 		log.Printf("xdisplay: cookie generation failed: %v", err)
 		writeError(w, err)
 		return
 	}
+	record, rerr := xAuthFileBytes(cookie, display)
+	if rerr != nil {
+		log.Printf("xdisplay: bad cookie: %v", rerr)
+		writeError(w, rerr)
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	if _, err := execRun(ctx, a.restConfig, coord.namespace, coord.pod, "",
-		xAuthAddArgs(display, coord.displayHost(), cookie), nil); err != nil {
-		log.Printf("xdisplay: xauth add on %s/%s failed: %v", coord.namespace, coord.pod, err)
+	if _, err := a.xExec(ctx, coord.namespace, coord.pod, "",
+		[]string{"/bin/sh", "-c", xAuthAppendScript()}, xAuthAppendStdin(record)); err != nil {
+		log.Printf("xdisplay: xauth append on %s/%s failed: %v", coord.namespace, coord.pod, err)
 		writeError(w, err)
 		return
 	}
 
-	// 2) Launch the command in the app pod; the cookie travels on exec
-	// stdin (newline-terminated, see xLaunchStdin) so it never shows in
-	// argv. stdout's single line is the setsid leader PID. The wrapper
-	// backgrounds the GUI and exits 0, so this exec returns promptly.
+	// 2) Launch the command in the app pod; the serialized Xauthority
+	// record travels base64 on exec stdin (newline-terminated, see
+	// xLaunchStdin) so it never shows in argv. stdout's single line is the
+	// setsid leader PID. The wrapper backgrounds the GUI and exits 0, so
+	// this exec returns promptly.
 	script := xLaunchScript(coord.displayHost(), display, xauthPath(display), req.Command)
-	out, err := execRun(ctx, a.restConfig, req.Namespace, req.Pod, req.Container,
-		[]string{"/bin/sh", "-c", script}, xLaunchStdin(cookie))
+	stdin := xLaunchStdin(record)
+	log.Printf("xdisplay: launch stdin bytes=%d display=%d", len(record), display)
+	out, err := a.xExec(ctx, req.Namespace, req.Pod, req.Container,
+		[]string{"/bin/sh", "-c", script}, stdin)
 	if err != nil {
-		log.Printf("xdisplay: launch in %s/%s failed: %v", req.Namespace, req.Pod, err)
+		log.Printf("xdisplay: launch in %s/%s failed: %v (pod said: %s)",
+			req.Namespace, req.Pod, err, strings.TrimSpace(out))
 		writeError(w, err)
 		return
 	}
@@ -589,7 +683,10 @@ func (a *api) handleXDisplayCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3) Record the session and answer.
+	// 3) Record the session and answer. The session stays allocated for the
+	// whole TTL/DELETE lifecycle, so the deferred failure-cleanup release
+	// must not run past this point.
+	released = true
 	a.xdisplay.record(display, token, req, pid)
 	writeJSON(w, http.StatusOK, xDisplayResponse{
 		Source:  a.source,
@@ -675,8 +772,9 @@ func (a *api) handleXDisplayDelete(w http.ResponseWriter, r *http.Request) {
 		[]string{"/bin/sh", "-c", "rm -f " + shellSingleQuote(xauthPath(session.display))}, nil); err != nil {
 		log.Printf("xdisplay: cookie cleanup in %s/%s failed: %v", session.namespace, session.pod, err)
 	}
-	if _, err := execRun(ctx, a.restConfig, newXServerCoord().namespace, newXServerCoord().pod, "",
-		xAuthRemoveArgs(session.display, newXServerCoord().displayHost()), nil); err != nil {
+	coord := newXServerCoord()
+	if _, err := execRun(ctx, a.restConfig, coord.namespace, coord.pod, "",
+		xAuthRemoveArgs(session.display), nil); err != nil {
 		log.Printf("xdisplay: xauth remove failed: %v", err)
 	}
 
@@ -749,8 +847,12 @@ type xDisplayHealthResponse struct {
 }
 
 // handleXDisplayHealth checks the xserver pod two ways: it must exist, and
-// the RFB port for the pool's first display must accept a TCP dial. Only
-// the cheap pod get is done when the pod is missing — no point dialing.
+// (direct dialer mode) the RFB port for the pool's first display must accept
+// a TCP dial — unreachable without a pod-IP route, so port-forward mode
+// (kos-server outside the cluster) reports availability from the pod get
+// alone; the portforward dial itself validates the pod when a session
+// opens. Only the cheap pod get is done when the pod is missing — no point
+// dialing.
 func (a *api) handleXDisplayHealth(w http.ResponseWriter, r *http.Request) {
 	if a.clientset == nil || a.xdisplay == nil {
 		writeJSON(w, http.StatusOK, xDisplayHealthResponse{Source: a.source})
@@ -773,6 +875,14 @@ func (a *api) handleXDisplayHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if xdisplayDialerMode() == xDialerPortFw {
+		// No pod-IP route: the TCP probe would always fail and lie about
+		// an apiserver-reachable x11vnc port. Pod scheduled with an IP is
+		// the best the health endpoint can honestly answer.
+		writeJSON(w, http.StatusOK, xDisplayHealthResponse{Source: a.source, Available: true})
+		return
+	}
+
 	addr := net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(vncBasePort+a.xdisplay.start))
 	conn, err := net.DialTimeout("tcp", addr, xdisplayDialTimeout)
 	if err != nil {
@@ -782,6 +892,249 @@ func (a *api) handleXDisplayHealth(w http.ResponseWriter, r *http.Request) {
 	_ = conn.Close()
 	writeJSON(w, http.StatusOK, xDisplayHealthResponse{Source: a.source, Available: true})
 }
+
+// port-forward requestID sequence for stream headers.
+var xForwardRequestID atomic.Uint64
+
+// xDisplayDialerMode selects how the RFB websocket proxy reaches x11vnc.
+type xDisplayDialerMode string
+
+const (
+	// xDialerPortFw tunnels the TCP stream through the API server
+	// port-forward subresource (KEP-4006 SPDY-over-websocket, falling back
+	// to plain SPDY upgrade on older clusters). Works wherever the
+	// apiserver is reachable — the only mode when kos-server runs outside
+	// the cluster.
+	xDialerPortFw xDisplayDialerMode = "portfw"
+	// xDialerDirect dials podIP:5900+N directly; cheaper, but only works
+	// for in-cluster kos-server deployments (or any host with a pod-IP
+	// route).
+	xDialerDirect xDisplayDialerMode = "direct"
+)
+
+// xdisplayDialerMode resolves KOS_XDISPLAY_DIALER: "direct" selects the
+// legacy direct dial, every non-empty other value (or empty, the default)
+// selects port-forward.
+func xdisplayDialerMode() xDisplayDialerMode {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(envXDisplayDialer))) {
+	case string(xDialerDirect):
+		return xDialerDirect
+	default:
+		return xDialerPortFw
+	}
+}
+
+// xPortForwardRequestURL builds the URL for a pod portforward subresource
+// request, mirroring execRequestURL's String()-building style so it works
+// with any rest.Config (including test fakes with no REST client).
+func xPortForwardRequestURL(cfg *rest.Config, namespace, pod string, port int) (string, error) {
+	// Same defense in depth as execRequestURL: the names are interpolated
+	// into the API path, so they must be well-formed even though handlers
+	// validate them earlier.
+	if !isK8sName(namespace) {
+		return "", fmt.Errorf("invalid namespace %q", namespace)
+	}
+	if !isK8sName(pod) {
+		return "", fmt.Errorf("invalid pod %q", pod)
+	}
+	if port <= 0 || port > 65535 {
+		return "", fmt.Errorf("invalid port %d", port)
+	}
+
+	base := strings.TrimSuffix(cfg.Host, "/")
+	params := urlpkg.Values{}
+	params.Set("ports", strconv.Itoa(port))
+
+	return fmt.Sprintf("%s/api/v1/namespaces/%s/pods/%s/portforward?%s",
+		base, namespace, pod, params.Encode()), nil
+}
+
+// xSPDYDialer builds the classic SPDY port-forward dialer
+// (k8s.io/client-go/transport/spdy), reusing the rest.Config's TLS and auth
+// transportation via spdy.RoundTripperFor. Kept as the fallback for clusters
+// without the KEP-4006 websocket-tunneling endpoint (< v1.30-ish).
+func xSPDYDialer(cfg *rest.Config, parsed *urlpkg.URL) (httpstream.Dialer, error) {
+	transport, upgrader, err := spdy.RoundTripperFor(cfg)
+	if err != nil {
+		return nil, err
+	}
+	client := &http.Client{Transport: transport, Timeout: xdisplayPortFwDialTimeout}
+	return spdy.NewDialer(upgrader, client, http.MethodGet, parsed), nil
+}
+
+// xPodDialer opens a raw TCP stream to the pod's VNC port through the K8s
+// API server port-forward subresource and exposes it as a net.Conn for
+// proxyRFB. Unlike kubectl (and the package's own PortForwarder), no local
+// listener is bound: the forwarding is userland-only — the data stream
+// created directly on the upgraded httpstream connection is handed back, so
+// kos-server never collides with host ports 5921-5925 and saves a localhost
+// hop. The whole dial (upgrade + stream setup) is bounded by
+// xdisplayPortFwDialTimeout; closing the returned net.Conn tears down the
+// entire port-forward connection so abrupt close propagates to the proxy
+// loops.
+func xPodDialer(ctx context.Context, cfg *rest.Config, namespace, pod string, port int) (net.Conn, error) {
+	if cfg == nil {
+		return nil, errOffline
+	}
+
+	rawURL, err := xPortForwardRequestURL(cfg, namespace, pod, port)
+	if err != nil {
+		return nil, err
+	}
+	parsed, err := urlpkg.Parse(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("port-forward url %q: %w", rawURL, err)
+	}
+
+	// Preferred: SPDY-over-websocket tunneling (KEP-4006 PortForwardWebsockets),
+	// what v1.37 speaks; it reuses rest.Config's TLS/auth through its own
+	// websocket.RoundTripperFor. Fallback: plain SPDY upgrade for older
+	// clusters. Any primary dial error falls through to the secondary.
+	primary, err := portforward.NewSPDYOverWebsocketDialer(parsed, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("build websocket port-forward dialer: %w", err)
+	}
+	secondary, err := xSPDYDialer(cfg, parsed)
+	if err != nil {
+		return nil, fmt.Errorf("build SPDY port-forward dialer: %w", err)
+	}
+	dialer := portforward.NewFallbackDialer(primary, secondary, func(error) bool { return true })
+
+	// The effective budget: xdisplayPortFwDialTimeout, tightened to the
+	// caller's deadline when it is sooner (the error must not claim a
+	// budget the caller shortened).
+	budget := xdisplayPortFwDialTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); 0 < remaining && remaining < budget {
+			budget = remaining
+		}
+	}
+	dialCtx, cancelDial := context.WithTimeout(ctx, budget)
+	defer cancelDial()
+
+	type dialResult struct {
+		conn     httpstream.Connection
+		protocol string
+		err      error
+	}
+	results := make(chan dialResult, 1)
+	go func() {
+		conn, protocol, err := dialer.Dial(portforward.PortForwardProtocolV1Name)
+		results <- dialResult{conn: conn, protocol: protocol, err: err}
+	}()
+
+	// Priority to an already-expired deadline: the dialer goroutine cannot
+	// produce a result before a hanging upgrade is canceled, so once the
+	// budget is spent the timeout error is the outcome.
+	select {
+	case <-dialCtx.Done():
+		return xPortForwardTimeoutError(namespace, pod, port, budget)
+	default:
+	}
+	select {
+	case res := <-results:
+		if res.err != nil {
+			return nil, fmt.Errorf("port-forward %s/%s port %d: %w", namespace, pod, port, res.err)
+		}
+		if res.protocol != portforward.PortForwardProtocolV1Name {
+			_ = res.conn.Close()
+			return nil, fmt.Errorf("port-forward %s/%s port %d: negotiated %q, want %q",
+				namespace, pod, port, res.protocol, portforward.PortForwardProtocolV1Name)
+		}
+		return xForwardedConn(res.conn, port)
+	case <-dialCtx.Done():
+		// The buffered channel lets the dialer goroutine finish without
+		// leaking once the canceled round trip unwinds.
+		return xPortForwardTimeoutError(namespace, pod, port, budget)
+	}
+}
+
+// xPortForwardTimeoutError is the bounded-dial failure: descriptive about
+// which leg hung (upgrade through the apiserver), not a bare timeout.
+func xPortForwardTimeoutError(namespace, pod string, port int, budget time.Duration) (net.Conn, error) {
+	return nil, fmt.Errorf("port-forward %s/%s port %d not ready after %s: "+
+		"apiserver unreachable or pod not ready", namespace, pod, port, budget)
+}
+
+// xForwardedConn creates the port-forward stream pair on an upgraded
+// connection (the same headers PortForwarder.handleConnection writes) and
+// returns the data stream as a net.Conn. A goroutine drains the error
+// stream: apiserver-reported forwarding errors are logged and immediately
+// propagate as a connection teardown, ending the RFB proxy loops.
+func xForwardedConn(conn httpstream.Connection, port int) (net.Conn, error) {
+	portStr := strconv.Itoa(port)
+	requestID := strconv.FormatUint(xForwardRequestID.Add(1), 10)
+
+	headers := http.Header{}
+	headers.Set(corev1.StreamType, corev1.StreamTypeError)
+	headers.Set(corev1.PortHeader, portStr)
+	headers.Set(corev1.PortForwardRequestIDHeader, requestID)
+	errorStream, err := conn.CreateStream(headers)
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("port-forward error stream (port %d): %w", port, err)
+	}
+
+	headers.Set(corev1.StreamType, corev1.StreamTypeData)
+	dataStream, err := conn.CreateStream(headers)
+	if err != nil {
+		_ = errorStream.Reset()
+		_ = conn.Close()
+		return nil, fmt.Errorf("port-forward data stream (port %d): %w", port, err)
+	}
+
+	go func() {
+		// Read incrementally (not io.ReadAll): the stream does not EOF
+		// until the whole connection closes, and a first error chunk must
+		// propagate immediately — the data leg dies with it, unwinding
+		// proxyRFB. Plain EOF/error exits the loop (either the other
+		// goroutines already unwound, or cleanup Close fires anyway).
+		buf := make([]byte, 512)
+		for {
+			n, readErr := errorStream.Read(buf)
+			if n > 0 {
+				log.Printf("xdisplay: port-forward error from apiserver (port %d): %s",
+					port, strings.TrimSpace(string(buf[:n])))
+				_ = conn.Close()
+				return
+			}
+			if readErr != nil {
+				return
+			}
+		}
+	}()
+
+	return &xForwardedNetConn{Stream: dataStream, connection: conn}, nil
+}
+
+// xForwardedNetConn adapts the port-forward data stream into net.Conn for
+// proxyRFB. Destinations/addresses are synthetic (the network hop is the
+// apiserver tunnel) and deadlines are accepted without effect: stream
+// liveness is enforced by the apiserver keepalive and the browser-side read
+// deadline — on either side ending, Close() tears down everything.
+type xForwardedNetConn struct {
+	httpstream.Stream
+	connection httpstream.Connection
+	closeConn  sync.Once
+}
+
+func (c *xForwardedNetConn) Close() error {
+	err := c.Stream.Close()
+	c.closeConn.Do(func() { _ = c.connection.Close() })
+	return err
+}
+
+func (c *xForwardedNetConn) LocalAddr() net.Addr              { return xForwardedAddr{} }
+func (c *xForwardedNetConn) RemoteAddr() net.Addr             { return xForwardedAddr{} }
+func (c *xForwardedNetConn) SetDeadline(time.Time) error      { return nil }
+func (c *xForwardedNetConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *xForwardedNetConn) SetWriteDeadline(time.Time) error { return nil }
+
+// xForwardedAddr is the synthetic net.Addr of a port-forwarded stream.
+type xForwardedAddr struct{}
+
+func (xForwardedAddr) Network() string { return "portforward" }
+func (xForwardedAddr) String() string  { return "pod/portforward" }
 
 // closeWSWithReason reports a failure that happened after the upgrade: the
 // HTTP status is already gone (the handshake switched protocols), so a WS
@@ -794,7 +1147,10 @@ func closeWSWithReason(conn *websocket.Conn, code int, reason string) {
 }
 
 // handleXDisplayWS upgrades to websocket and proxies binary frames to the
-// x11vnc TCP listener of the session's display (websockify pattern).
+// session display's x11vnc TCP listener (websockify pattern). The cluster
+// leg depends on KOS_XDISPLAY_DIALER: "portfw" (default) tunnels the TCP
+// stream through the API server port-forward subresource (xPodDialer), so
+// kos-server works outside the cluster too; "direct" dials podIP:5900+N.
 // The token is validated on every upgrade: it may reconnect (browser
 // refresh) until TTL/DELETE, but each stream is two goroutines copying
 // frames and picking up none of the session state after authorization —
@@ -816,38 +1172,74 @@ func (a *api) handleXDisplayWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Everything the request must learn through HTTP JSON happens BEFORE
-	// the upgrade — status codes die with the handshake. The pod get is
-	// cheap enough to hoist so a missing/unready xserver pod is an
-	// ordinary error response, not a post-upgrade mystery.
-	coord := newXServerCoord()
-	podGetCtx, cancelPodGet := context.WithTimeout(r.Context(), 10*time.Second)
-	pod, err := a.clientset.CoreV1().Pods(coord.namespace).Get(podGetCtx, coord.pod, metav1.GetOptions{})
-	cancelPodGet()
-	if err != nil {
-		writeError(w, err)
-		return
+	// the upgrade — status codes die with the handshake. Only direct mode
+	// needs the pod get (it hoists a missing/unready xserver pod into an
+	// ordinary error response); the port-forward dial validates the pod
+	// itself at the apiserver and reports failures post-upgrade.
+	var podIP string
+	if xdisplayDialerMode() == xDialerDirect {
+		coord := newXServerCoord()
+		podGetCtx, cancelPodGet := context.WithTimeout(r.Context(), 10*time.Second)
+		pod, err := a.clientset.CoreV1().Pods(coord.namespace).Get(podGetCtx, coord.pod, metav1.GetOptions{})
+		cancelPodGet()
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		podIP = pod.Status.PodIP
 	}
 
-	// Upgrade AFTER authorization and the cheap reachability checks.
+	// Upgrade AFTER authorization and the cheap pod checks.
 	conn, err := wsUpgrader().Upgrade(w, r, nil)
 	if err != nil {
 		return // Upgrade already wrote the failure response.
 	}
 	defer conn.Close()
 
-	if pod.Status.PodIP == "" {
-		closeWSWithReason(conn, websocket.CloseTryAgainLater, "xserver pod has no IP")
+	if xdisplayDialerMode() == xDialerDirect {
+		if podIP == "" {
+			closeWSWithReason(conn, websocket.CloseTryAgainLater, "xserver pod has no IP")
+			return
+		}
+		addr := net.JoinHostPort(podIP, strconv.Itoa(session.vncPort))
+		upstream, err := net.DialTimeout("tcp", addr, xdisplayDialTimeout)
+		if err != nil {
+			closeWSWithReason(conn, websocket.CloseTryAgainLater, "dial x11vnc: "+err.Error())
+			return
+		}
+		defer upstream.Close()
+		proxyRFB(conn, upstream, idleTimeout())
 		return
 	}
 
-	addr := net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(session.vncPort))
-	upstream, err := net.DialTimeout("tcp", addr, xdisplayDialTimeout)
+	// Port-forward mode: bound the tunnel dial but keep it off the 15s
+	// request budget (the websocket is hijacked and long-lived; exec/ws
+	// derives its cluster leg the same way via context.WithoutCancel). The
+	// forwarding targets the X SERVER pod — x11vnc listens on its 5900+display
+	// port; the session's namespace/pod name the APP pod the GUI runs in.
+	coord := newXServerCoord()
+	dialCtx, cancelDial := context.WithTimeout(context.WithoutCancel(r.Context()), xdisplayPortFwDialTimeout)
+	defer cancelDial()
+
+	upstream, err := a.xDial(dialCtx, coord.namespace, coord.pod, session.vncPort)
 	if err != nil {
-		closeWSWithReason(conn, websocket.CloseTryAgainLater, "dial x11vnc: "+err.Error())
+		closeWSWithReason(conn, websocket.CloseTryAgainLater, "port-forward to x11vnc: "+err.Error())
 		return
 	}
 	defer upstream.Close()
+	log.Printf("xdisplay: websocket session for display :%d via apiserver port-forward %s/%s port %d",
+		session.display, coord.namespace, coord.pod, session.vncPort)
 	proxyRFB(conn, upstream, idleTimeout())
+}
+
+// xDial resolves the RFB upstream for a session through the configured
+// cluster-transport dialer; a.xdialer overrides it (test seam, injected as
+// a fake dialer function).
+func (a *api) xDial(ctx context.Context, namespace, pod string, port int) (net.Conn, error) {
+	if a.xdialer != nil {
+		return a.xdialer(ctx, namespace, pod, port)
+	}
+	return xPodDialer(ctx, a.restConfig, namespace, pod, port)
 }
 
 // proxyRFB copies binary frames between the browser websocket and the

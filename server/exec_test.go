@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	urlpkg "net/url"
 	"strings"
 	"testing"
 	"time"
@@ -249,6 +252,79 @@ func TestExecRunIntegrations(t *testing.T) {
 	}
 	_ = clientset
 	_ = restConfig
+}
+
+// TestExecRunLiveStdin exercises the EXACT stdin contract used by the
+// xdisplay launch wrapper (base64 cookie + trailing newline through
+// `read -r COOKIE`) against the live cluster, for BOTH executors: the
+// modern websocket v5 path and the classic SPDY fallback. stdin crossing
+// these paths is the one thing unit tests with exec-stub configs can't
+// cover (see the review finding that spawned this test).
+//
+// Requires a reachable kubeconfig plus a pod with bash; set
+// KOS_LIVE_EXEC_POD / KOS_LIVE_EXEC_NS / KOS_LIVE_EXEC_CONTAINER to target
+// it (defaults mirror the xclock-test live deployment in ns kos).
+func TestExecRunLiveStdin(t *testing.T) {
+	execIntegrationGate(t)
+
+	_, _, restConfig, source := buildClient()
+	if source == offlineSource {
+		t.Skip("server running offline — real-exec integration skipped")
+	}
+	ns := envOrDefault("KOS_LIVE_EXEC_NS", "kos")
+	pod := envOrDefault("KOS_LIVE_EXEC_POD", "xclock-test")
+	container := envOrDefault("KOS_LIVE_EXEC_CONTAINER", "app")
+	// stdin payload mirrors xLaunchStdin: base64("ABCD\n") + no extra data.
+	stdin := []byte("QUJDRAo=")
+	script := `read -r C; if [ -n "$C" ]; then echo "cookie=${C}"; else echo NO-COOKIE; exit 97; fi`
+	command := []string{"/bin/bash", "-c", script}
+	for _, mode := range []string{"ws", "spdy"} {
+		t.Run(mode, func(t *testing.T) {
+			// Force the transport under test by pinning the fallback: the
+			// ws mode runs the stock executor; spdy mode swaps in a SPDY
+			// executor for the same request.
+			var out string
+			var runErr error
+			if mode == "spdy" {
+				url, err := execRequestURL(restConfig, ns, pod, container, command, false)
+				if err != nil {
+					t.Fatalf("execRequestURL: %v", err)
+				}
+				parsed, perr := urlpkg.Parse(url)
+				if perr != nil {
+					t.Fatalf("parse: %v", perr)
+				}
+				exec, berr := remotecommand.NewSPDYExecutor(restConfig, http.MethodPost, parsed)
+				if berr != nil {
+					t.Fatalf("spdy executor: %v", berr)
+				}
+				var stdout bytes.Buffer
+				runErr = exec.StreamWithContext(context.Background(),
+					remotecommand.StreamOptions{Stdin: bytes.NewReader(stdin),
+						Stdout: &stdout, Stderr: &stdout})
+				out = stdout.String()
+			} else {
+				out, runErr = execRun(context.Background(), restConfig, ns, pod,
+					container, command, stdin)
+			}
+			if !strings.Contains(out, "cookie=QUJDRAo=") {
+				t.Fatalf("mode %s: stdin did not arrive. err=%v out=%q", mode, runErr, out)
+			}
+		})
+	}
+	shells := map[string]string{"ws": "/bin/bash", "spdy": "/bin/bash"}
+	if shell := envOrDefault("KOS_LIVE_EXEC_SHELL", ""); shell != "" {
+		shells["ws"] = shell
+	}
+	t.Run("shell", func(t *testing.T) {
+		command := []string{shells["ws"], "-c", script}
+		out, runErr := execRun(context.Background(), restConfig, ns, pod,
+			container, command, stdin)
+		if !strings.Contains(out, "cookie=QUJDRAo=") {
+			t.Fatalf("shell %s: stdin did not arrive. err=%v out=%q",
+				shells["ws"], runErr, out)
+		}
+	})
 }
 
 // wsTestPair upgrades a one-shot websocket server and hands the server-side

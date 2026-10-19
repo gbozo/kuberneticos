@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	urlpkg "net/url"
 	"os"
@@ -1045,6 +1046,13 @@ type api struct {
 	clientset  kubernetes.Interface
 	restConfig *rest.Config
 	xdisplay   *xDisplayAllocator
+	// xdialer overrides the cluster-transport dialer used by the xdisplay
+	// websocket proxy (tests inject a fake dialer; nil = real port-forward
+	// dialer, see xPodDialer in xdisplay.go).
+	xdialer func(ctx context.Context, namespace, pod string, port int) (net.Conn, error)
+	// execer overrides the exec transport used by the xdisplay create
+	// handler (tests inject a fake executor; nil = real execRun).
+	execer func(ctx context.Context, namespace, pod, container string, command []string, stdin []byte) (string, error)
 }
 
 func (a *api) handleHealth(w http.ResponseWriter, _ *http.Request) {

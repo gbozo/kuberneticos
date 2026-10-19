@@ -43,8 +43,9 @@ above.
 | `KOS_XDISPLAY_POOL` | `5` | Number of displays in the static pool (`:START` … `:START+N-1`) |
 | `KOS_XDISPLAY_TTL` | `12h` | Lifetime of an xdisplay session token (modifiable reconnects/`DELETE` semantics unchanged) |
 | `KOS_XSERVER_NAMESPACE` | `kos` | Namespace of the central shared X server pod |
-| `KOS_XSERVER_POD` | `kos-xserver-0` | X server pod name (xauth exec target, pod IP for VNC dials) |
+| `KOS_XSERVER_POD` | `kos-xserver-0` | X server pod name (xauth exec target; pod IP only for `direct` dialer mode probes) |
 | `KOS_XSERVER_SERVICE` | `kos-xserver` | X server service name (DISPLAY FQDN `<svc>.<ns>.svc`) |
+| `KOS_XDISPLAY_DIALER` | `portfw` | How the RFB websocket proxy reaches x11vnc: `portfw` = through the K8s API server port-forward subresource (SPDY-over-websocket, SPDY fallback for older clusters — required when kos-server runs outside the cluster); `direct` = dial `podIP:5900+N` (cheaper; in-cluster deployments only). Any other value selects `portfw`. |
 | `KOS_STREAM_IDLE_TIMEOUT` | `5m` | Idle budget for the websocket streams (xdisplay ws, exec ws) |
 
 ## Endpoints
@@ -77,8 +78,8 @@ All responses are JSON. CORS is **origin-restricted**: an allowlist (defaults to
 | `POST` | `/api/xdisplay` | Allocate an X display + launch a GUI app: body `{namespace, pod, container?, app?, command[:]}` → `{"source":...,"display":<n>,"token":"...","wsPath":"/api/xdisplay/ws?token=..."}` |
 | `DELETE` | `/api/xdisplay?token=<t>` or `?display=<n>` | Kill the launched app process, clean the cookie and free the display → `{"source":...,"ok":true,"message":...}` |
 | `GET` | `/api/xdisplay/list` | `{"source":...,"available":<bool>,"displays":[{display,app,pod,namespace,container,createdAt,sessionAge}]}` |
-| `GET` | `/api/xdisplay/health` | `{"source":...,"available":<bool>}` — xserver pod reachable and its first VNC port answers TCP |
-| `GET` | `/api/xdisplay/ws?token=<t>` | **WebSocket** — binary RFB frames proxied to the display's `5900+N` x11vnc listener (websockify clone) |
+| `GET` | `/api/xdisplay/health` | `{"source":...,"available":<bool>}` — xserver pod reachable; in `direct` dialer mode also a TCP probe of the first VNC port |
+| `GET` | `/api/xdisplay/ws?token=<t>` | **WebSocket** — binary RFB frames proxied to the display's `5900+N` x11vnc listener (websockify clone); cluster leg via API server port-forward (`KOS_XDISPLAY_DIALER=direct` → pod-IP dial) |
 | `GET` | `/api/exec/ws?namespace=<ns>&pod=<p>&container=<c>` | **WebSocket** — terminal exec bridge: binary = data, text `{"type":"resize","cols":N,"rows":N}` = resize, text `{"type":"error"\|"closed"}` = lifecycle |
 
 Every response includes a `source` field (`"live"` or `"offline"`). All query
@@ -145,12 +146,19 @@ it into `/tmp/.kos-xauth-<N>` via `xauth -f`, prints the launcher shell PID and
 its random **token** (32 hex chars): it survives browser refreshes until
 `DELETE` or the TTL (`KOS_XDISPLAY_TTL`, default `12h`) and may open multiple
 websocket streams — `GET /api/xdisplay/ws?token=...` proxies binary frames
-between the browser and `podIP:5900+N` (x11vnc). `DELETE` (by `token=` or
-`display=`) execs `kill -TERM <pid>` in the app pod, best-effort removes the
-cookie file and xauth entries and frees the display; unknown/expired tokens
-answer `404`. `list`/`health` follow the metrics philosophy: HTTP 200 with
-`available:false` when offline or the xserver is unreachable — never a 5xx.
-`POST /api/xdisplay` on an exhausted pool answers `503`.
+between the browser and x11vnc (`5900+N`). The cluster leg follows
+`KOS_XDISPLAY_DIALER`: the default `portfw` tunnels the TCP stream through the
+API server **port-forward subresource** (SPDY-over-websocket per KEP-4006,
+classic SPDY upgrade as fallback for older clusters), so kos-server works from
+outside the cluster behind an apiserver tunnel; `direct` dials
+`podIP:5900+N`, which only works for in-cluster deployments (`/health`
+matches: pod-get-only in `portfw` mode, TCP probe in `direct`). `DELETE`
+(by `token=` or `display=`) execs `kill -TERM <pid>` in the app pod,
+best-effort removes the cookie file and xauth entries and frees the display;
+unknown/expired tokens answer `404`. `list`/`health` follow the metrics
+philosophy: HTTP 200 with `available:false` when offline or the xserver is
+unreachable — never a 5xx. `POST /api/xdisplay` on an exhausted pool answers
+`503`.
 
 The two metrics endpoints are the exception to the error mapping: they read
 CPU/memory from `metrics.k8s.io/v1beta1` (via the

@@ -18,7 +18,9 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/api': 'http://localhost:8700',
+      // ws:true so /api websocket upgrades (xdisplay RFB, exec terminal
+      // streams) reach kos-server; without it the upgrade stalls silently.
+      '/api': { target: 'http://localhost:8700', ws: true },
     },
   },
   test: {

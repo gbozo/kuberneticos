@@ -25,6 +25,7 @@ themes are included.
 </p>
 
 <p align="center">
+  Xclock and Firefox run as pods in the cluster and rendered to any user browser client opening the cluster that requests an instance. In a multinode cluster you get distributed sharing across users. The goal is to make this a Clustered os so you can spin multinode clusters and manage them via an easy UI, rendering also apps, agentic coding, mutlinode GPU sharing (llama.ccp across nodes with multiple pods, central resource handling ) etc...
   <img width="900px" src="Kos-Screenie.jpeg" alt="Full-screenshot of the KuberneticOS desktop">
 </p>
 

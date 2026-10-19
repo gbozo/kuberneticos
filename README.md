@@ -11,7 +11,7 @@
 [![GitHub Issues](https://img.shields.io/github/issues/gbozo/kuberneticos.svg)](https://github.com/gbozo/kuberneticos/issues)
 [![GitHub Pull Requests](https://img.shields.io/github/issues-pr/gbozo/kuberneticos.svg)](https://github.com/gbozo/kuberneticos/pulls)
 [![License](https://img.shields.io/badge/license-GPLv3-yellowgreen)](/LICENSE)
-
+This is experimental software --->>>>>>  early-early PRE-ALPHA
 </div>
 
 ---
